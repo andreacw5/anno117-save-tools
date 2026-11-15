@@ -914,14 +914,15 @@ def cmd_map(a):
         elif kind == 'unit' and o is not None:
             d.rectangle((x - 5, y - 5, x + 5, y + 5), fill=c, outline=(0, 0, 0))
     f, fs = font(max(14, H // 90)), font(max(11, H // 130))
+    gap = max(6, H // 200)                                             # space between name and owner
     for e in area_list:
         if 'center' not in e: continue
         txt = e.get('custom_name') or (e.get('city') or f"area {e['area']}").replace(' Nome', '')
         x, y = e['center'][0], H - e['center'][1]
         c = color.get(e['owner'], grey)
-        d.text((x, y - 22), txt, font=f, fill=c, anchor='ms', stroke_width=3, stroke_fill=(0, 0, 0))
+        d.text((x, y - 22), txt, font=f, fill=c, anchor='md', stroke_width=3, stroke_fill=(0, 0, 0))
         if e['owner'] is not None:                                     # owner under the island name
-            d.text((x, y - 20), str(label_of(e['owner'])), font=fs, fill=c, anchor='mt',
+            d.text((x, y - 22 + gap), str(label_of(e['owner'])), font=fs, fill=c, anchor='mt',
                    stroke_width=2, stroke_fill=(0, 0, 0))
     if not a.legend:
         rows = []
