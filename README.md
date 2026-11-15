@@ -74,10 +74,14 @@ Output (`sessions/<province>.json`, abridged):
 |---|---|
 | Save container (RDA v2.2) and FileDB v2 | ✅ tested on real saves |
 | Ships, modules, positions, owners, pirates | ✅ tested on real saves |
-| Reading game `.rda` archives / `assets.xml` | ⚠️ implemented after the Anno 1800 layout, **not yet verified on Anno 117** |
-| Buildings, goods, islands | ❌ not mapped yet |
+| Game `.rda` archives, `assets.xml`, `texts_<lang>.xml` | ✅ tested on Anno 117 (Steam, with *Dawn of the Delta*) |
+| Islands: owner, fertilities and deposits, income, city status, extent | ✅ tested on real saves |
+| Warehouse stock per island | ✅ tested on real saves |
+| City names | ⚠️ default names exact; renamed cities **inferred** from trade route codes |
+| Province maps (`map`) | ✅ tested on three provinces; tile seams are visible |
+| Building types and production | ❌ not mapped yet (only positions are read) |
 
-Reports and pull requests are welcome, especially output of `list` on your game's `data` folder.
+Reports and pull requests are welcome, especially output of `list` on your game's `maindata` folder.
 
 ## How it works
 
