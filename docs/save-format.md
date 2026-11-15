@@ -112,13 +112,22 @@ Each island, or district (*nome*) on the Nile, is an **area**. Two places descri
   | `Fertility` | GUIDs of the island's fertilities and deposits (template `Fertility`) |
   | `CityNameGuid` | `int64` text id: the `LineId` of the default city name in `texts_<lang>.xml` |
   | `PassiveTrade/History/TradeRouteEntries/…/RouteName` | UTF-16 names of the trade routes that served the area |
-  | `AreaEconomy/StrgLrg` | warehouse content (not decoded yet) |
+  | `AreaEconomy/StrgLrg` | warehouse content, see below |
+  | `AreaEconomy/StorageTrends` | per good, 120 history points (`int32`); not the current stock |
 
 - `GameSessionManager/AreaManagers/AreaManager_<area id>`: the area's simulation.
   `AreaMoneyManager/TotalMoneyIncomePerMinute` is a `float32` balance;
   `AreaPopulationManager/CurrentCityStatusGUID` is the city status (template `CityStatus`, whose
   name is under `Values/CityStatus/CityStatusName`); the area's buildings are in
   `AreaObjectManager/GameObject/objects`, and their positions give the island's extent.
+
+### Warehouse (`StrgLrg`)
+
+A flat list of `uint32`: N good GUIDs, then N amounts. The first GUID is absolute; each next one
+is stored as the number of GUIDs skipped since the previous (`next = previous + value + 1`).
+Example, `2085 16 0 149600 | 23 21 25 19`: charcoal (2085) 23, mud (2102) 21, reed (2103) 25,
+mud bricks (151704) 19. Goods with amount 0 can be listed. `extract` writes the non-zero ones as
+`storage` (names) and `storage_guids`. `AreaEconomy/TradeStorage/StrgLrg` uses the same layout.
 
 ### City names
 
@@ -140,7 +149,7 @@ as a guess.
 - **Ship and city names.** They are text references (`VehicleTextGuid`, `CityNameGuid`): see above for city names.
   Trade route names (`RouteName`), however, are plain UTF-16 text and contain the first three
   letters of each city (for example `Hemp Kan - Mem`).
-- **Buildings and goods.** Building positions are read (to size islands); warehouse contents are not decoded yet.
+- **Buildings.** Positions are read (to size islands); building types are not summarised yet.
 
 ## 7. Known limits of `extract`
 

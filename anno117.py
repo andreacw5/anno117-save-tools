@@ -248,6 +248,18 @@ def name_cities(all_areas, utexts, humans):
                 if len(hits) == 1: e['custom_name'] = hits[0]
                 else: e['custom_name_candidates'] = hits
 
+def storage(b):
+    """Decode a StrgLrg value: N good GUIDs then N amounts, all uint32. The first GUID is
+    absolute, each following one is stored as the number of GUIDs skipped since the previous."""
+    w = struct.unpack('<%dI' % (len(b) // 4), b[:len(b) // 4 * 4])
+    n = len(w) // 2
+    if not n or len(w) != 2 * n: return {}
+    keys, g = [], None
+    for x in w[:n]:
+        g = x if g is None else g + x + 1
+        keys.append(g)
+    return dict(zip(keys, w[n:]))
+
 def areas(sroot, names, gmap, texts):
     """One entry per area (island or Nile district): owner, default city name, fertilities and
     deposits, income, status, extent of its buildings, trade routes and the city's route code."""
@@ -288,6 +300,12 @@ def areas(sroot, names, gmap, texts):
                 e['objects'] = len(ps)
                 e['center'] = [round(sum(xs) / len(xs)), round(sum(zs) / len(zs))]
                 e['extent'] = [round(min(xs)), round(min(zs)), round(max(xs)), round(max(zs))]
+        eco = one(v, 'AreaEconomy')
+        sl = one(eco, 'StrgLrg') if eco is not None else None
+        if sl is not None:
+            goods = sorted(((g, n) for g, n in storage(sl.value).items() if n), key=lambda x: -x[1])
+            e['storage'] = {name(g): n for g, n in goods}
+            e['storage_guids'] = {str(g): n for g, n in goods}
         if rs: e['trade_routes'] = dict(rs.most_common())
         out.append(e)
     return out

@@ -5,7 +5,7 @@ No dependencies, Python 3.8 or newer.
 
 - **`extract`**: turn a save into one JSON file per province, listing every participant's ships
   (type, installed modules, map position, squadrons) and land units, pirate factions, and every
-  island (owner, fertilities and deposits, income, city status, trade routes).
+  island (owner, fertilities and deposits, warehouse stock, income, city status, trade routes).
 - **`assets`**: pull the official GUID → name map out of your own copy of the game.
 - **`list`**: browse the contents of `.rda` archives.
 - **`guid-table`**: render the GUID map as a Markdown page.
@@ -49,6 +49,7 @@ Output (`sessions/<province>.json`, abridged):
   "areas": [
     {"area": 25668, "owner": 41, "city": "Honey Lotus Nome", "route_code": "Mem", "custom_name": "...",
      "fertilities": ["..."], "fertility_guids": [2202],
+     "storage": {"...": 1949}, "storage_guids": {"2072": 1949},
      "income_per_minute": 2763, "city_status": "...", "objects": 793,
      "center": [1344, 319], "extent": [1229, 230, 1458, 418], "trade_routes": {"Flax Kan - Mem": 41}}
   ]
