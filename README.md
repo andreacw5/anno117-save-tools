@@ -68,7 +68,7 @@ Output (`sessions/<province>.json`, abridged):
 | `assets <path> [-o FILE] [--lang LANG] [--all] [--extract-dir DIR]` | Finds `assets*.xml` and `texts_<LANG>.xml` in the `.rda` archives (or in a folder of extracted `.xml`) and writes `guid_names.json`. Without `--all` it keeps only naval, military, participant, session, fertility, city status and production assets. Production buildings also get `factory` (inputs, outputs, cycle time), read from `assets.xml` and `properties.xml`. |
 | `map <save> <maindata> [--session S] [-o FILE] [--names FILE]… [--texts FILE]… [--width W] [--color WHO=COLOUR]… [--legend]` | PNG map of one province (default `nile`). Each island shows its name and, below, its owner; `--legend` adds a legend box in the top-left corner. `--color` sets a participant's colour by name or GUID (`--color "Dorian=yellow" --color 41=#2ecc40`); human players default to gold, pirates are always red. Needs **Pillow** (`pip install pillow`), the only command with a dependency. |
 | `list <file.rda or dir> [FILTER]` | Lists archive contents, optionally filtered by substring. |
-| `guid-table <guid_names.json> [-o FILE]` | Writes a Markdown table (default `docs/guids.md`). |
+| `guid-table <guid_names.json> [-o FILE] [--template T]… [--title TEXT]` | Writes a Markdown page (default `docs/guids.md`), one table per template; `--template` keeps only those templates, in that order. `docs/guids.md` is made with `--template LandUnit --template NavalUnit --template ShipModule --template MilitaryTowerUnit` from an English map. |
 
 ## Status
 

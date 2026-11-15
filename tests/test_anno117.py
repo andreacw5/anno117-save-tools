@@ -480,5 +480,25 @@ class TestRegressions(TempDirMixin, unittest.TestCase):
             A.rda_files(f)
 
 
+class TestGuidTable(TempDirMixin, unittest.TestCase):
+    def test_sections_per_template_in_given_order(self):
+        import argparse
+        names = self.write('n.json', json.dumps({
+            '1': {'name': 'Troop B', 'template': 'LandUnit', 'name_local': 'Bee'},
+            '2': {'name': 'Troop A', 'template': 'LandUnit'},
+            '3': {'name': 'Ship', 'template': 'NavalUnit', 'name_local': 'Ship | One'},
+            '4': {'name': 'Farm', 'template': 'Production'}}))
+        out = os.path.join(self.tmp, 'sub', 'g.md')
+        with quiet():
+            A.cmd_guid_table(argparse.Namespace(names=names, output=out, title='T',
+                                                template=['NavalUnit', 'LandUnit']))
+        with open(out, encoding='utf-8') as f:
+            md = f.read()
+        self.assertLess(md.index('## Ships (1)'), md.index('## Land units (2)'))
+        self.assertLess(md.index('| 2 | Troop A |'), md.index('| 1 | Troop B | Bee |'))
+        self.assertIn('Ship \\| One', md)
+        self.assertNotIn('Farm', md)
+
+
 if __name__ == '__main__':
     unittest.main()

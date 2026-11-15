@@ -20,8 +20,8 @@ Commands:
         Needs Pillow (the only optional dependency).
   list <file.rda | dir> [FILTER]
         List the files contained in .rda archives (handy when `assets` finds nothing).
-  guid-table <guid_names.json> [-o FILE]
-        Render the GUID map as a Markdown table (e.g. for the GitHub Pages site).
+  guid-table <guid_names.json> [-o FILE] [--template T ...] [--title TEXT]
+        Render the GUID map as Markdown, one table per template (e.g. for the GitHub Pages site).
 
 The save layout was reverse-engineered by comparing with the Anno 1800 formats documented by
 the anno-mods community (RDAExplorer, FileDBReader). See docs/ for details.
@@ -710,22 +710,36 @@ def cmd_list(a):
         except Exception as e:
             print(f'  ! {rda}: {e}', file=sys.stderr)
 
+TEMPLATE_TITLES = {'LandUnit': 'Land units', 'NavalUnit': 'Ships', 'ShipModule': 'Ship modules',
+                   'MilitaryTowerUnit': 'Defensive towers', 'Fertility': 'Fertilities and deposits',
+                   'Product': 'Goods', 'CityStatus': 'City statuses'}
+
 def cmd_guid_table(a):
+    """Markdown page of a GUID map: one table per template, in the order given by --template
+    (every template when none is given)."""
     m = read_json(a.names)
     if os.path.dirname(a.output): os.makedirs(os.path.dirname(a.output), exist_ok=True)
-    esc = lambda s: (s or '').replace('|', '\\|')
-    rows = sorted(((int(k), v) for k, v in m.items() if k.isdigit()),
-                  key=lambda kv: ((kv[1].get('template') or '~') if isinstance(kv[1], dict) else '~', kv[0]))
-    lines = ['---', 'title: GUID reference', '---', '', '# GUID reference', '',
-             f'{len(rows)} GUIDs, generated with `anno117.py guid-table`. '
-             'Names come from the game files of the person who generated this page.', '',
-             '| GUID | Name | Local name | Template |', '|---:|---|---|---|']
-    for g, v in rows:
-        v = v if isinstance(v, dict) else {'name': v}
-        lines.append(f'| {g} | {esc(v.get("name"))} | {esc(v.get("name_local"))} | {esc(v.get("template"))} |')
+    esc = lambda s: str(s or '').replace('|', '\\|')
+    rows = [(int(k), v if isinstance(v, dict) else {'name': v}) for k, v in m.items() if k.isdigit()]
+    groups = collections.defaultdict(list)
+    for g, v in sorted(rows, key=lambda r: ((r[1].get('name') or '').lower(), r[0])):
+        groups[v.get('template') or '(no template)'].append((g, v))
+    order = a.template or sorted(groups)
+    total = sum(len(groups.get(t, [])) for t in order)
+    lines = ['---', f'title: {a.title}', '---', '', f'# {a.title}', '',
+             f'{total} GUIDs, generated with `anno117.py guid-table'
+             + ''.join(f' --template {t}' for t in a.template or []) + '`. '
+             'Internal names come from `assets.xml`, translated names from `texts_<lang>.xml` of the '
+             'game files of the person who generated this page.', '']
+    for t in order:
+        if not groups.get(t): continue
+        lines += [f'## {TEMPLATE_TITLES.get(t, t)} ({len(groups[t])})', '',
+                  '| GUID | Internal name | Name |', '|---:|---|---|']
+        lines += [f'| {g} | {esc(v.get("name"))} | {esc(v.get("name_local"))} |' for g, v in groups[t]]
+        lines.append('')
     with open(a.output, 'w', encoding='utf-8') as f:
-        f.write('\n'.join(lines) + '\n')
-    print(f'{len(rows)} rows -> {a.output}')
+        f.write('\n'.join(lines))
+    print(f'{total} rows -> {a.output}')
 
 # ---------------- map ----------------
 # A session's terrain is the MapTemplate stored in the save: tiles (.a7m) placed at a position.
@@ -933,6 +947,10 @@ def main():
     l.add_argument('path'); l.add_argument('filter', nargs='?')
     t = sub.add_parser('guid-table', help='GUID map -> Markdown table')
     t.add_argument('names'); t.add_argument('-o', '--output', default='docs/guids.md')
+    t.add_argument('--template', action='append', metavar='T',
+                   help='only assets of this template, one section each, in this order; repeatable '
+                        '(e.g. LandUnit, NavalUnit, ShipModule)')
+    t.add_argument('--title', default='GUID reference', help='page title')
     mp = sub.add_parser('map', help='save game + game files -> PNG map of a province (needs Pillow)')
     mp.add_argument('save'); mp.add_argument('game', help='Anno 117 "maindata" folder')
     mp.add_argument('--session', default='nile', help='session label or GUID (default nile)')
