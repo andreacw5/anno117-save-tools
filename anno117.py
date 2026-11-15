@@ -3,7 +3,7 @@
 anno117.py - read Anno 117: Pax Romana save games and game data. Python 3.8+, no dependencies.
 
 Commands:
-  extract <save.a8s> [-o DIR] [--names FILE ...] [--texts FILE ...] [--radius R]
+  extract <save.a8s> [-o DIR] [--names FILE ...] [--texts FILE ...] [--city-names FILE] [--radius R]
         One JSON file per session (province): ships with names, modules and positions, land
         units and pirate factions, grouped by owner (participant); every area (island) with its
         owner, fertilities, warehouse, buildings, population, production per minute, income,
@@ -337,6 +337,19 @@ def name_cities(all_areas, utexts, humans):
                 if len(hits) == 1: e['custom_name'] = hits[0]
                 else: e['custom_name_candidates'] = hits
 
+def apply_city_names(sessions, path):
+    """City names you typed in the game, from a JSON file: {"<area id>": "name"} or
+    {"<session>:<area id>": "name"} when an id exists in several sessions. They win over the names
+    inferred from trade routes. The save stores a renamed city's text but no link to its area."""
+    if not path: return
+    m = read_json(path)
+    for label, area_list in sessions:
+        for e in area_list:
+            nm = m.get(f"{label}:{e['area']}") or m.get(str(e['area']))
+            if nm:
+                e['custom_name'] = nm; e['custom_name_source'] = 'city-names file'
+                e.pop('custom_name_candidates', None)
+
 def storage(b):
     """Decode a StrgLrg value: N good GUIDs then N amounts, all uint32. The first GUID is
     absolute, each following one is stored as the number of GUIDs skipped since the previous."""
@@ -542,6 +555,7 @@ def cmd_extract(a):
                         'areas': areas(sroot, names, gmap, texts, info)})
     # trade routes cross provinces, so cities are matched to route codes over the whole save
     name_cities([e for r in results for e in r['areas']], utexts, {p for p, n in names.items() if n})
+    apply_city_names([(r['session'], r['areas']) for r in results], a.city_names)
     attach_routes(results, trade_routes(data_root), ships, names, gmap)
     for res in results:
         label = res['session']
@@ -832,6 +846,7 @@ def cmd_map(a):
     sessions = [(session_label(sg, gmap), sg, root, areas(root, names, gmap, texts, info))
                 for sg, root in save_sessions(data_root)]
     name_cities([e for s in sessions for e in s[3]], user_texts(data_root), {p for p, n in names.items() if n})
+    apply_city_names([(s[0], s[3]) for s in sessions], a.city_names)
     pick = [s for s in sessions if a.session in (s[0], str(s[1]))]
     if not pick: sys.exit('Unknown session; available: ' + ', '.join(f'{s[0]} ({s[1]})' for s in sessions))
     label, sg, sroot, area_list = pick[0]
@@ -935,6 +950,8 @@ def main():
     e.add_argument('--names', action='append', metavar='FILE',
                    help='GUID name map; repeatable, later files win (default: ./guid_names.json if present)')
     e.add_argument('--radius', type=float, default=40, help='squadron clustering radius (default 40)')
+    e.add_argument('--city-names', metavar='FILE',
+                   help='JSON {"<area id>" or "<session>:<area id>": "name"} with the names you gave your cities')
     e.add_argument('--texts', action='append', metavar='FILE',
                    help='texts_<lang>.xml (as extracted by `assets`) to name the areas\' default cities')
     s = sub.add_parser('assets', help='game files -> GUID name map')
@@ -957,6 +974,7 @@ def main():
     mp.add_argument('-o', '--output', help='PNG file (default <session>_map.png)')
     mp.add_argument('--names', action='append', metavar='FILE', help='GUID name map(s), as for extract')
     mp.add_argument('--texts', action='append', metavar='FILE', help='texts_<lang>.xml, as for extract')
+    mp.add_argument('--city-names', metavar='FILE', help='your city names, as for extract')
     mp.add_argument('--width', type=int, default=1600, help='output width in pixels (default 1600)')
     mp.add_argument('--legend', action='store_true',
                    help='draw a legend box in the top-left corner (owners are always written under island names)')

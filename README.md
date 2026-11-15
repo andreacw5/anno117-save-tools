@@ -64,7 +64,7 @@ Output (`sessions/<province>.json`, abridged):
 
 | Command | What it does |
 |---|---|
-| `extract <save> [-o DIR] [--names FILE]… [--texts FILE]… [--radius R]` | One JSON per session. `--texts` takes a `texts_<lang>.xml` (as extracted by `assets`) to name the islands' default cities. `--names` can be repeated to layer maps (e.g. your own hand-written guesses, then the official `guid_names.json`): later files win. `--radius` sets the distance used to group ships into squadrons (default 40). |
+| `extract <save> [-o DIR] [--names FILE]… [--texts FILE]… [--city-names FILE] [--radius R]` | One JSON per session. `--city-names` takes a JSON `{"<area id>": "name"}` with the names you gave your cities (the save does not link them to the island). `--texts` takes a `texts_<lang>.xml` (as extracted by `assets`) to name the islands' default cities. `--names` can be repeated to layer maps (e.g. your own hand-written guesses, then the official `guid_names.json`): later files win. `--radius` sets the distance used to group ships into squadrons (default 40). |
 | `assets <path> [-o FILE] [--lang LANG] [--all] [--extract-dir DIR]` | Finds `assets*.xml` and `texts_<LANG>.xml` in the `.rda` archives (or in a folder of extracted `.xml`) and writes `guid_names.json`. Without `--all` it keeps only naval, military, participant, session, fertility, city status and production assets. Production buildings also get `factory` (inputs, outputs, cycle time), read from `assets.xml` and `properties.xml`. |
 | `map <save> <maindata> [--session S] [-o FILE] [--names FILE]… [--texts FILE]… [--width W] [--color WHO=COLOUR]… [--legend]` | PNG map of one province (default `nile`). Each island shows its name and, below, its owner; `--legend` adds a legend box in the top-left corner. `--color` sets a participant's colour by name or GUID (`--color "Dorian=yellow" --color 41=#2ecc40`); human players default to gold, pirates are always red. Needs **Pillow** (`pip install pillow`), the only command with a dependency. |
 | `list <file.rda or dir> [FILTER]` | Lists archive contents, optionally filtered by substring. |
@@ -79,7 +79,7 @@ Output (`sessions/<province>.json`, abridged):
 | Game `.rda` archives, `assets.xml`, `texts_<lang>.xml` | ✅ tested on Anno 117 (Steam, with *Dawn of the Delta*) |
 | Islands: owner, fertilities and deposits, income, city status, extent | ✅ tested on real saves |
 | Warehouse stock per island | ✅ tested on real saves |
-| City names | ⚠️ default names exact; renamed cities **inferred** from trade route codes |
+| City names | ⚠️ default names exact; renamed cities from `--city-names`, otherwise **inferred** from trade route codes |
 | Province maps (`map`) | ✅ tested on three provinces; tile seams are visible |
 | Buildings, population, production per minute | ✅ tested on real saves; residents' consumption not included |
 | Trade routes: ships, stops, goods | ✅ tested on real saves; load/unload direction not decoded |

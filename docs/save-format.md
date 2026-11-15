@@ -159,7 +159,16 @@ A renamed city keeps its default `CityNameGuid`. The typed name is stored, with 
 names, in `MetaGameManager/MetaUserGeneratedTextManager/UserGeneratedTexts` (pairs of an `int64` id
 and `RawText`/`SanitizedText`/`DisplayText`), but we found no reference from the area to that id.
 
-`extract` therefore infers it from the trade routes. Route names end with `Abc - Xyz`, the first
+An experiment settled where the link is: renaming one city between two saves added **only** the
+new entry to `UserGeneratedTexts`. Nothing in the area, in the session or anywhere else in the
+save changed or referred to the new id. The game therefore derives the text id from the area
+with its own hash (ids of areas whose ids share the low byte share the top byte of the text id);
+it is none of the common 64-bit hashes (CRC-64 variants, xxHash64, MurmurHash64A, FNV-1/1a, MD5,
+SHA-1) over the obvious encodings of area id, session GUID, owner or `CityNameGuid`.
+
+You can give `extract` and `map` the names yourself with `--city-names FILE`, a JSON object
+`{"<area id>": "name"}` (or `"<session>:<area id>"` when the id exists in several sessions);
+those names win. Without it, `extract` infers them from the trade routes. Route names end with `Abc - Xyz`, the first
 three letters of both cities, and routes may cross provinces. A code goes to the area that appears
 in every route using it, by elimination. It is kept only when confirmed: either the default city
 name starts with it, or the area belongs to a player with a custom company name and exactly one

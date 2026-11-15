@@ -500,5 +500,21 @@ class TestGuidTable(TempDirMixin, unittest.TestCase):
         self.assertNotIn('Farm', md)
 
 
+class TestCityNames(TempDirMixin, unittest.TestCase):
+    def test_file_names_win_and_session_prefix(self):
+        a = {'area': 10, 'owner': 41, 'city': 'Old', 'custom_name_candidates': ['X', 'Y']}
+        b = {'area': 10, 'owner': 41, 'city': 'Other'}
+        c = {'area': 11, 'owner': 41, 'city': 'Kept', 'custom_name': 'From routes'}
+        f = self.write('names.json', json.dumps({'nile:10': 'Memphis', '10': 'Fallback'}))
+        A.apply_city_names([('nile', [a, c]), ('latium', [b])], f)
+        self.assertEqual((a['custom_name'], b['custom_name'], c['custom_name']), ('Memphis', 'Fallback', 'From routes'))
+        self.assertNotIn('custom_name_candidates', a)
+
+    def test_no_file_is_a_no_op(self):
+        a = {'area': 10, 'owner': 41}
+        A.apply_city_names([('nile', [a])], None)
+        self.assertEqual(a, {'area': 10, 'owner': 41})
+
+
 if __name__ == '__main__':
     unittest.main()
