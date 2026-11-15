@@ -7,6 +7,8 @@ No dependencies, Python 3.8 or newer.
   (type, installed modules, map position, squadrons) and land units, pirate factions, and every
   island (owner, fertilities and deposits, warehouse stock, income, city status, trade routes).
 - **`assets`**: pull the official GUID → name map out of your own copy of the game.
+- **`map`**: draw a province as a PNG, from the save's map template and the game's own map tiles,
+  with islands, buildings, ships and units coloured by owner and pirate structures marked.
 - **`list`**: browse the contents of `.rda` archives.
 - **`guid-table`**: render the GUID map as a Markdown page.
 
@@ -62,6 +64,7 @@ Output (`sessions/<province>.json`, abridged):
 |---|---|
 | `extract <save> [-o DIR] [--names FILE]… [--texts FILE]… [--radius R]` | One JSON per session. `--texts` takes a `texts_<lang>.xml` (as extracted by `assets`) to name the islands' default cities. `--names` can be repeated to layer maps (e.g. your own hand-written guesses, then the official `guid_names.json`): later files win. `--radius` sets the distance used to group ships into squadrons (default 40). |
 | `assets <path> [-o FILE] [--lang LANG] [--all] [--extract-dir DIR]` | Finds `assets*.xml` and `texts_<LANG>.xml` in the `.rda` archives (or in a folder of extracted `.xml`) and writes `guid_names.json`. Without `--all` it keeps only naval, military, participant, session, fertility and city status assets. |
+| `map <save> <maindata> [--session S] [-o FILE] [--names FILE]… [--texts FILE]… [--width W]` | PNG map of one province (default `nile`). Needs **Pillow** (`pip install pillow`), the only command with a dependency. |
 | `list <file.rda or dir> [FILTER]` | Lists archive contents, optionally filtered by substring. |
 | `guid-table <guid_names.json> [-o FILE]` | Writes a Markdown table (default `docs/guids.md`). |
 

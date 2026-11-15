@@ -53,6 +53,20 @@ such as RDAExplorer.
 If `assets` finds nothing, run `python anno117.py list "<install>/maindata" xml` and open an issue
 with the output.
 
+## Map tiles
+
+Each province's terrain is assembled from tiles listed in the save's
+`GameSessionManager/MapTemplate` (`TemplateElement/Element`: `Position`, `MapFilePath`, `Rotation90`).
+A tile is a folder in the `*provinces*.rda` archives:
+
+| File | Content |
+|---|---|
+| `<tile>.a7minfo` | FileDB: `MapSize` (two `int32`, e.g. 448×448), `ActiveMapGrid` (`x`, `y`, `bits`: one bit per 8×8 cell, rows padded to 64 bits, the part of the tile that is really used), `ActiveMapRect` |
+| `_gamedata/<tile>/mapimage_0.dds` | the tile's map picture, 512×512, BC7 (DXGI 98), north up |
+
+`map` pastes each picture scaled to `MapSize` at `Position`, masked by the active grid. Map
+coordinates match those of ships and buildings in the save, with z pointing north.
+
 ## Sharing names
 
 `guid_names.json` and the extracted `.xml` are derived from Ubisoft's game files and are not

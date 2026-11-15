@@ -11,6 +11,9 @@ Commands:
         Find assets*.xml and texts_<LANG>.xml inside the game's .rda archives (or in a folder
         of already-extracted .xml files) and write a GUID -> name map (default guid_names.json).
         By default only military/naval/participant/session assets are kept; --all keeps everything.
+  map <save.a8s> <maindata> [--session S] [-o FILE]
+        PNG map of a province: the game's map tiles placed as in the save's MapTemplate, plus
+        buildings, ships and units coloured by owner. Needs Pillow (the only optional dependency).
   list <file.rda | dir> [FILTER]
         List the files contained in .rda archives (handy when `assets` finds nothing).
   guid-table <guid_names.json> [-o FILE]
@@ -475,6 +478,165 @@ def cmd_guid_table(a):
     open(a.output, 'w', encoding='utf-8').write('\n'.join(lines) + '\n')
     print(f'{len(rows)} rows -> {a.output}')
 
+# ---------------- map ----------------
+# A session's terrain is the MapTemplate stored in the save: tiles (.a7m) placed at a position.
+# Each tile folder in the game's *provinces*.rda archives holds <tile>.a7minfo (MapSize, and
+# ActiveMapGrid: one bit per 8x8 cell telling which part belongs to the tile) and
+# _gamedata/<tile>/mapimage_0.dds (BC7, north up). Pillow is needed to decode it.
+OWNER_COLORS = [(66, 135, 245), (46, 184, 92), (245, 166, 35), (171, 71, 188), (0, 172, 193),
+                (255, 112, 67), (124, 179, 66), (236, 64, 122)]
+
+def template_tiles(sroot):
+    mt = one(one(sroot, 'GameSessionManager'), 'MapTemplate')
+    out = []
+    for t in ch(mt, 'TemplateElement') if mt is not None else []:
+        e = one(t, 'Element')
+        f = one(e, 'MapFilePath') if e is not None else None
+        if f is None: continue
+        r = one(e, 'Rotation90')
+        out.append({'pos': struct.unpack('<ii', one(e, 'Position').value),
+                    'dir': os.path.dirname(f.value.decode('utf-16le').rstrip('\0').replace('\\', '/')).lower(),
+                    'rot': r.value[0] if r is not None and r.value else 0})
+    return out
+
+def tile_layers(tiles, game):
+    """Find each tile's MapSize, active grid and map image in the game's archives."""
+    from PIL import Image
+    dirs = {t['dir']: t for t in tiles}
+    rdas = [p for p in find_rda(game) if re.search(r'provinces|patch', os.path.basename(p), re.I)]
+    for rda in rdas:
+        print(f'  reading {os.path.basename(rda)} ...')
+        for n, get in rda_entries(rda):
+            nl = n.lower()
+            d = nl.rsplit('/_gamedata/', 1)[0] if '/_gamedata/' in nl else os.path.dirname(nl)
+            t = dirs.get(d)
+            if t is None: continue
+            if nl.endswith('.a7minfo'):
+                r = filedb(get())
+                t['size'] = struct.unpack('<ii', one(r, 'MapSize').value)
+                g = one(r, 'ActiveMapGrid')
+                if g is not None:
+                    t['grid'] = (u(one(g, 'x').value), u(one(g, 'y').value), one(g, 'bits').value)
+            elif nl.endswith('/mapimage_0.dds'):
+                t['img'] = Image.open(io.BytesIO(get())).convert('RGB')   # later archives (patches) win
+    return [t for t in tiles if 'size' in t and 'img' in t]
+
+def compose_terrain(tiles):
+    from PIL import Image
+    H = max(max(t['pos'][0] + t['size'][0], t['pos'][1] + t['size'][1]) for t in tiles)
+    im = Image.new('RGB', (H, H), (20, 24, 28))
+    for t in tiles:
+        S = t['size'][0]
+        img = t['img'].resize((S, S))
+        mask = None
+        if 'grid' in t:
+            X, Y, bits = t['grid']; rb = len(bits) // Y
+            m = Image.new('L', (X, Y), 0); px = m.load()
+            for gy in range(Y):
+                row = int.from_bytes(bits[gy * rb:(gy + 1) * rb], 'little')
+                for gx in range(X):
+                    if row >> gx & 1: px[gx, Y - 1 - gy] = 255      # grid rows go north, image rows south
+            mask = m.resize((S, S), Image.NEAREST)
+        if t['rot']:
+            img, mask = img.rotate(90 * t['rot']), mask.rotate(90 * t['rot']) if mask else None
+        x, z = t['pos']
+        im.paste(img, (x, H - z - S), mask)
+    return im
+
+def cmd_map(a):
+    try:
+        from PIL import Image, ImageDraw, ImageFont
+    except ImportError:
+        sys.exit('The map command needs Pillow: pip install pillow')
+    gmap = load_names(a.names if a.names else ['guid_names.json'] if os.path.exists('guid_names.json') else [])
+    files = rda_files(a.save)
+    data_root = filedb(zlib.decompress(files['data.a7s']))
+    owners, names = meta_map(data_root)
+    texts = read_texts(a.texts) if a.texts else {}
+    sessions = []
+    for s in one(data_root.children[0], 'GameSessions').children:
+        sd, desc = one(s, 'SessionData'), one(s, 'SessionDesc')
+        if sd is None: continue
+        sg = u(one(desc, 'SessionGUID').value)
+        label = KNOWN_SESSIONS.get(sg) or re.sub(r'\W+', '_', gmap.get(sg, f'session_{sg}')).lower()
+        root = filedb(one(sd, 'BinaryData').value)
+        sessions.append((label, sg, root, areas(root, names, gmap, texts)))
+    name_cities([e for s in sessions for e in s[3]], user_texts(data_root), {p for p, n in names.items() if n})
+    pick = [s for s in sessions if a.session in (s[0], str(s[1]))]
+    if not pick: sys.exit('Unknown session; available: ' + ', '.join(f'{s[0]} ({s[1]})' for s in sessions))
+    label, sg, sroot, area_list = pick[0]
+    tiles = tile_layers(template_tiles(sroot), a.game)
+    if not tiles: sys.exit('No map tiles found: point the second argument at the "maindata" folder')
+    im = compose_terrain(tiles)
+    H = im.size[1]
+    im = Image.blend(im, Image.new('RGB', im.size, (0, 0, 0)), 0.25)    # darken so markers stand out
+    d = ImageDraw.Draw(im)
+    def font(sz):
+        for f in ('arialbd.ttf', 'DejaVuSans-Bold.ttf', 'Arial Bold.ttf'):
+            try: return ImageFont.truetype(f, sz)
+            except OSError: pass
+        return ImageFont.load_default()
+    humans = {p for p, n in names.items() if n}
+    gsm = one(sroot, 'GameSessionManager')
+    pirates, objs = set(), []
+    for am in one(gsm, 'AreaManagers').children:
+        aid = int(am.name.split('_')[-1]) if am.name.startswith('AreaManager_') else None
+        aom = one(am, 'AreaObjectManager'); go = one(aom, 'GameObject') if aom is not None else None
+        ob_list = one(go, 'objects') if go is not None else None
+        for ob in (ob_list.children if ob_list else []):
+            if one(ob, 'Pirate') is not None: pirates.add(u(one(ob, 'guid').value))
+            p = one(ob, 'Position')
+            if p is None: continue
+            x, _, z = struct.unpack('<fff', p.value)
+            mp = one(ob, 'MetaPersistent'); mid = one(mp, 'MetaID') if mp is not None else None
+            kind = 'ship' if one(ob, 'ShipModuleOwner') is not None else 'unit' if one(ob, 'Unit') is not None else 'building'
+            objs.append((kind, owners.get(u(mid.value)) if mid is not None else None, aid, x, z))
+    area_owner = {e['area']: e['owner'] for e in area_list}
+    present = sorted({o for k, o, aid, x, z in objs if o is not None} | {o for o in area_owner.values() if o})
+    others = [p for p in present if p not in humans and p not in pirates]
+    color = {p: (255, 215, 0) for p in humans}
+    color.update({p: (230, 40, 40) for p in pirates})
+    label_of = lambda p: names.get(p) or gmap.get(p) or str(p)
+    palette = {}                                                       # same name, same colour
+    for p in others: color[p] = palette.setdefault(label_of(p), OWNER_COLORS[len(palette) % len(OWNER_COLORS)])
+    grey = (170, 170, 170)
+    for kind, o, aid, x, z in objs:                                   # buildings: small dots
+        if kind != 'building': continue
+        c = color.get(o or area_owner.get(aid), grey)
+        d.rectangle((x - 1.5, H - z - 1.5, x + 1.5, H - z + 1.5), fill=c)
+    for kind, o, aid, x, z in objs:                                   # pirate structures: crosses
+        if kind == 'building' and (o or area_owner.get(aid)) in pirates:
+            d.line((x - 6, H - z - 6, x + 6, H - z + 6), fill=(255, 60, 60), width=3)
+            d.line((x - 6, H - z + 6, x + 6, H - z - 6), fill=(255, 60, 60), width=3)
+    for kind, o, aid, x, z in objs:                                   # ships: triangles, units: squares
+        c = color.get(o, grey); y = H - z
+        if kind == 'ship':
+            d.polygon([(x, y - 9), (x - 7, y + 6), (x + 7, y + 6)], fill=c, outline=(0, 0, 0))
+        elif kind == 'unit' and o is not None:
+            d.rectangle((x - 5, y - 5, x + 5, y + 5), fill=c, outline=(0, 0, 0))
+    f = font(max(14, H // 90))
+    for e in area_list:
+        if 'center' not in e: continue
+        txt = e.get('custom_name') or (e.get('city') or f"area {e['area']}").replace(' Nome', '')
+        x, y = e['center'][0], H - e['center'][1]
+        c = color.get(e['owner'], grey)
+        d.text((x, y - 22), txt, font=f, fill=c, anchor='ms', stroke_width=3, stroke_fill=(0, 0, 0))
+    # legend
+    rows = list({label_of(p): (color[p], label_of(p)) for p in present if p in color}.values())
+    rows += [((255, 60, 60), 'pirate structures (x)'), (grey, 'nobody / unknown')]
+    lf = font(max(14, H // 100)); lh = lf.size + 8 if hasattr(lf, 'size') else 20
+    bx, by = 20, 20
+    d.rectangle((bx - 10, by - 10, bx + 420, by + lh * (len(rows) + 2)), fill=(0, 0, 0))
+    d.text((bx, by), f'{label}: ships = triangles, units = squares', font=lf, fill=(255, 255, 255))
+    for i, (c, t) in enumerate(rows, 1):
+        d.rectangle((bx, by + i * lh + 3, bx + 16, by + i * lh + 19), fill=c)
+        d.text((bx + 26, by + i * lh), t, font=lf, fill=(255, 255, 255))
+    if a.width and a.width < H: im = im.resize((a.width, a.width), Image.LANCZOS)
+    out = a.output or f'{label}_map.png'
+    im.save(out)
+    print(f'{label}: {len(tiles)} tiles, {sum(k == "ship" for k, *_ in objs)} ships, '
+          f'{sum(k == "unit" for k, *_ in objs)} units -> {out}')
+
 def main():
     ap = argparse.ArgumentParser(description='Anno 117: Pax Romana save game and game data tools.')
     sub = ap.add_subparsers(dest='cmd', required=True)
@@ -495,8 +657,16 @@ def main():
     l.add_argument('path'); l.add_argument('filter', nargs='?')
     t = sub.add_parser('guid-table', help='GUID map -> Markdown table')
     t.add_argument('names'); t.add_argument('-o', '--output', default='docs/guids.md')
+    mp = sub.add_parser('map', help='save game + game files -> PNG map of a province (needs Pillow)')
+    mp.add_argument('save'); mp.add_argument('game', help='Anno 117 "maindata" folder')
+    mp.add_argument('--session', default='nile', help='session label or GUID (default nile)')
+    mp.add_argument('-o', '--output', help='PNG file (default <session>_map.png)')
+    mp.add_argument('--names', action='append', metavar='FILE', help='GUID name map(s), as for extract')
+    mp.add_argument('--texts', action='append', metavar='FILE', help='texts_<lang>.xml, as for extract')
+    mp.add_argument('--width', type=int, default=1600, help='output width in pixels (default 1600)')
     a = ap.parse_args()
-    {'extract': cmd_extract, 'assets': cmd_assets, 'list': cmd_list, 'guid-table': cmd_guid_table}[a.cmd](a)
+    {'extract': cmd_extract, 'assets': cmd_assets, 'list': cmd_list, 'guid-table': cmd_guid_table,
+     'map': cmd_map}[a.cmd](a)
 
 if __name__ == '__main__':
     main()
