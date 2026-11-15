@@ -3,18 +3,21 @@
 anno117.py - read Anno 117: Pax Romana save games and game data. Python 3.8+, no dependencies.
 
 Commands:
-  extract <save.a8s> [-o DIR] [--names FILE ...] [--texts FILE ...]
-        One JSON file per session (province): ships with modules and positions, land units
-        and pirate factions, grouped by owner (participant), plus every area (island) with its
+  extract <save.a8s> [-o DIR] [--names FILE ...] [--texts FILE ...] [--radius R]
+        One JSON file per session (province): ships with names, modules and positions, land
+        units and pirate factions, grouped by owner (participant); every area (island) with its
         owner, fertilities, warehouse, buildings, population, production per minute, income,
-        city status, trade routes and city name.
-  assets <path> [-o FILE] [--lang LANG] [--all]
-        Find assets*.xml and texts_<LANG>.xml inside the game's .rda archives (or in a folder
-        of already-extracted .xml files) and write a GUID -> name map (default guid_names.json).
-        By default only military/naval/participant/session assets are kept; --all keeps everything.
-  map <save.a8s> <maindata> [--session S] [-o FILE]
+        city status and city name; and the trade routes stopping there (ships, stations, goods).
+  assets <path> [-o FILE] [--lang LANG] [--all] [--extract-dir DIR]
+        Find assets*.xml, texts_<LANG>.xml and export/properties.xml inside the game's .rda
+        archives (or in a folder of already-extracted .xml files) and write a GUID -> name map
+        (default guid_names.json), with templates and production data (inputs, outputs, cycle).
+        By default only military, naval, participant, session, fertility, city status and
+        production assets are kept; --all keeps everything.
+  map <save.a8s> <maindata> [--session S] [-o FILE] [--color WHO=COLOUR ...] [--legend]
         PNG map of a province: the game's map tiles placed as in the save's MapTemplate, plus
-        buildings, ships and units coloured by owner. Needs Pillow (the only optional dependency).
+        buildings, ships and units coloured by owner and island names with their owner.
+        Needs Pillow (the only optional dependency).
   list <file.rda | dir> [FILTER]
         List the files contained in .rda archives (handy when `assets` finds nothing).
   guid-table <guid_names.json> [-o FILE]
@@ -28,12 +31,22 @@ import xml.etree.ElementTree as ET
 
 # ---------------- RDA v2.2 ----------------
 # Block flags (as in RDAExplorer): 1 = compressed, 2 = encrypted, 4 = memory-resident, 8 = deleted.
+class Archive(list):
+    """[(name, getter)] of an RDA archive; close() releases the memory map (and the file lock on
+    Windows). Getters stop working after close()."""
+    mm = None
+    def close(self):
+        if self.mm is not None: self.mm.close(); self.mm = None
+    def __enter__(self): return self
+    def __exit__(self, *exc): self.close()
+
 def rda_entries(path):
     """Read only the index of an RDA v2.2 archive (works on multi-GB files via mmap).
     Returns [(name, getter)]; file data is read and decompressed only when getter() is called."""
-    f = open(path, 'rb')
-    d = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ)
+    with open(path, 'rb') as f:           # the mmap keeps its own handle to the file
+        d = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ)
     if d[:18] != b'Resource File V2.2':
+        d.close()
         raise ValueError(f'{path}: unrecognised format (expected RDA V2.2)')
     off = struct.unpack_from('<Q', d, 784)[0]
     out, seen = [], set()
@@ -71,14 +84,18 @@ def rda_entries(path):
                     return zlib.decompress(b) if z else b
             out.append((name, get))
         off = nxt
+    out = Archive(out); out.mm = d
     return out
+
+BAD_ARCHIVE = (ValueError, struct.error, zlib.error, OSError)   # corrupt, truncated or unreadable
 
 def rda_files(path):
     """All files of the archive in memory (fine for save games, which are small)."""
     try:
-        return {n: get() for n, get in rda_entries(path)}
-    except ValueError as e:
-        raise SystemExit(str(e))
+        with rda_entries(path) as entries:
+            return {n: get() for n, get in entries}
+    except BAD_ARCHIVE as e:
+        raise SystemExit(f'{path}: unreadable archive ({e})')
 
 # ---------------- FileDB v2 ----------------
 class Node:
@@ -108,15 +125,54 @@ def filedb(d):
             n = Node(tags.get(i, 't%x' % i)); stack[-1].children.append(n); stack.append(n)
     return root
 
-def ch(n, name): return [c for c in n.children if c.name == name]
+# Helpers are None-safe, so a missing branch of the tree gives None/[] instead of an exception.
+def ch(n, name): return [c for c in n.children if c.name == name] if n is not None else []
 def one(n, name):
-    for c in n.children:
+    for c in (n.children if n is not None else ()):
         if c.name == name: return c
 def u(v): return int.from_bytes(v, 'little')
+
+def unpack(n, fmt):
+    """struct.unpack of a node's value, or None when the node is missing or has another size."""
+    v = n.value if n is not None else None
+    return struct.unpack(fmt, v) if v is not None and len(v) == struct.calcsize(fmt) else None
+
+def meta_root(data_root):
+    """MetaGameManager, the first child of data.a7s."""
+    return data_root.children[0] if data_root is not None and data_root.children else None
+
+def read_json(path):
+    with open(path, encoding='utf-8') as f:
+        return json.load(f)
+
+def write_json(path, data, indent):
+    with open(path, 'w', encoding='utf-8') as f:
+        json.dump(data, f, ensure_ascii=False, indent=indent)
+
+def read_text(path):
+    with open(path, encoding='utf-8', errors='replace') as f:
+        return f.read()
+
+def load_save(path):
+    """Open a save game and parse data.a7s."""
+    files = rda_files(path)
+    if 'data.a7s' not in files:
+        sys.exit(f'{path}: not an Anno 117 save game (no data.a7s inside)')
+    return filedb(zlib.decompress(files['data.a7s']))
+
+def save_sessions(data_root):
+    """(session GUID, session root) for every province in the save."""
+    for s in getattr(one(meta_root(data_root), 'GameSessions'), 'children', []):
+        bd, sg = one(one(s, 'SessionData'), 'BinaryData'), one(one(s, 'SessionDesc'), 'SessionGUID')
+        if bd is not None and sg is not None:
+            yield u(sg.value), filedb(bd.value)
 
 # ---------------- save extraction ----------------
 # Session GUIDs observed so far (used when no name map is available).
 KNOWN_SESSIONS = {3245: 'latium', 6627: 'albion', 149679: 'nile'}
+
+def session_label(sg, gmap):
+    return KNOWN_SESSIONS.get(sg) or re.sub(r'\W+', '_', gmap.get(sg, f'session_{sg}')).lower()
 
 def load_names(paths):
     """Merge GUID name maps; later files override earlier ones. Values may be plain strings
@@ -125,7 +181,7 @@ def load_names(paths):
     for path in paths:
         if not os.path.exists(path):
             print(f'  ! name map {path} not found, skipped', file=sys.stderr); continue
-        for k, v in json.load(open(path, encoding='utf-8')).items():
+        for k, v in read_json(path).items():
             if k.isdigit():
                 v = (v.get('name_local') or v.get('name')) if isinstance(v, dict) else v
                 if v: m[int(k)] = v
@@ -146,9 +202,9 @@ def cluster(points, radius=40):
 
 def meta_map(data_root):
     """MetaID -> participant GUID, and participant GUID -> custom company name."""
-    mom = one(one(data_root.children[0], 'MetaGameObjectManager'), 'MetaObjectMap')
+    mom = one(one(meta_root(data_root), 'MetaGameObjectManager'), 'MetaObjectMap')
     owners, names = {}, {}
-    for e in mom.children:
+    for e in getattr(mom, 'children', []):
         i, p = one(e, 'ID'), one(e, 'ParticipantGUID')
         if i is not None and p is not None:
             owners[u(i.value)] = u(p.value)
@@ -158,40 +214,63 @@ def meta_map(data_root):
             if len(v) > 1: names[u(p.value)] = v[1].decode('utf-16le', 'replace')
     return owners, names
 
-def session(sroot, owners, names, gmap, radius):
+def roman(n):
+    out = ''
+    for v, r in ((1000, 'M'), (900, 'CM'), (500, 'D'), (400, 'CD'), (100, 'C'), (90, 'XC'), (50, 'L'),
+                 (40, 'XL'), (10, 'X'), (9, 'IX'), (5, 'V'), (4, 'IV'), (1, 'I')):
+        while n >= v: out += r; n -= v
+    return out
+
+def ship_name(ob, texts):
+    """Nameable/VehicleTextGuid is the LineId of a name in texts_<lang>.xml; VehicleTextIterator
+    counts reuses of the same name (1 = none, 3 = 'III')."""
+    nb = one(ob, 'Nameable'); g = one(nb, 'VehicleTextGuid'); i = one(nb, 'VehicleTextIterator')
+    if g is None or len(g.value) != 8: return None
+    t = texts.get(struct.unpack('<q', g.value)[0])
+    n = u(i.value) if i is not None else 1
+    return (f'{t} {roman(n)}' if n > 1 else t) if t else None
+
+def area_managers(sroot):
+    return getattr(one(one(sroot, 'GameSessionManager'), 'AreaManagers'), 'children', [])
+
+def area_objects(am):
+    """Game objects of one AreaManager_<id>."""
+    return getattr(one(one(one(am, 'AreaObjectManager'), 'GameObject'), 'objects'), 'children', [])
+
+def session_objects(sroot):
+    for am in area_managers(sroot):
+        yield from area_objects(am)
+
+def session(sroot, owners, names, gmap, radius, texts=None):
     name = lambda g: gmap.get(g, f'GUID {g}')
     ships = collections.defaultdict(lambda: collections.defaultdict(list))
     units = collections.defaultdict(collections.Counter)
     pirates = []
-    am = one(one(sroot, 'GameSessionManager'), 'AreaManagers')
-    for area in am.children:
-        aom = one(area, 'AreaObjectManager')
-        go = one(aom, 'GameObject') if aom else None
-        objs = one(go, 'objects') if go else None
-        if not objs: continue
-        for ob in objs.children:
-            g = u(one(ob, 'guid').value)
-            p = one(ob, 'Pirate')
-            if p is not None:
-                c = struct.unpack('<ff', one(one(p, 'AreaOfActivity'), 'ptCenter').value)
-                mw, k = one(p, 'MaxEverReachedWarships'), one(p, 'Kontor')
-                pirates.append({'participant': g, 'name': name(g),
-                                'activity_center': [round(x) for x in c],
-                                'max_warships_reached': u(mw.value) if mw else None,
-                                'base_object_id': one(k, 'ObjectID').value.hex() if k else None})
-            mp = one(ob, 'MetaPersistent')
-            mid = one(mp, 'MetaID') if mp is not None else None
-            owner = owners.get(u(mid.value)) if mid is not None else None
-            pos = struct.unpack('<fff', one(ob, 'Position').value) if one(ob, 'Position') else (0, 0, 0)
-            smo = one(ob, 'ShipModuleOwner')
-            if smo is not None:
-                mods = sorted(u(m.value) for ism in ch(smo, 'InstalledShipModules')
-                              for t in ism.children for m in ch(t, 'ShipModuleGuid'))
-                ships[owner][g].append({'modules': [name(m) for m in mods],
-                                        'module_guids': mods,
-                                        'position': [round(pos[0]), round(pos[2])]})
-            elif one(ob, 'Unit') is not None:
-                units[owner][g] += 1
+    for ob in session_objects(sroot):
+        gn = one(ob, 'guid')
+        if gn is None: continue
+        g = u(gn.value)
+        p = one(ob, 'Pirate')
+        if p is not None:
+            c = unpack(one(one(p, 'AreaOfActivity'), 'ptCenter'), '<ff')
+            mw, k = one(p, 'MaxEverReachedWarships'), one(one(p, 'Kontor'), 'ObjectID')
+            pirates.append({'participant': g, 'name': name(g),
+                            'activity_center': [round(x) for x in c] if c else None,
+                            'max_warships_reached': u(mw.value) if mw is not None else None,
+                            'base_object_id': k.value.hex() if k is not None else None})
+        mid = one(one(ob, 'MetaPersistent'), 'MetaID')
+        owner = owners.get(u(mid.value)) if mid is not None else None
+        pos = unpack(one(ob, 'Position'), '<fff') or (0, 0, 0)
+        smo = one(ob, 'ShipModuleOwner')
+        if smo is not None:
+            mods = sorted(u(m.value) for ism in ch(smo, 'InstalledShipModules')
+                          for t in ism.children for m in ch(t, 'ShipModuleGuid'))
+            nm = ship_name(ob, texts or {})
+            ships[owner][g].append({**({'name': nm} if nm else {}), 'modules': [name(m) for m in mods],
+                                    'module_guids': mods,
+                                    'position': [round(pos[0]), round(pos[2])]})
+        elif one(ob, 'Unit') is not None:
+            units[owner][g] += 1
     parts = []
     for owner in sorted(set(ships) | set(units), key=lambda x: (x is None, x or 0)):
         sh = ships.get(owner, {})
@@ -207,7 +286,7 @@ def session(sroot, owners, names, gmap, radius):
 
 def user_texts(data_root):
     """Texts typed by players (city, ship and army names), from MetaUserGeneratedTextManager."""
-    m = one(data_root.children[0], 'MetaUserGeneratedTextManager')
+    m = one(meta_root(data_root), 'MetaUserGeneratedTextManager')
     lst = one(m, 'UserGeneratedTexts') if m is not None else None
     out = []
     for v in (lst.children[1::2] if lst is not None else []):
@@ -225,24 +304,30 @@ def name_cities(all_areas, utexts, humans):
     one player-typed text starts with it (a renamed city)."""
     users = collections.defaultdict(list)                     # code -> [areas of each route]
     by_route = collections.defaultdict(set)
-    for e in all_areas:
-        for r in e.get('trade_routes', {}): by_route[r].add(id(e))
-    for r, ids in by_route.items():
+    for i, e in enumerate(all_areas):
+        for r in e.get('trade_routes', {}): by_route[r].add(i)
+    for r, ids in sorted(by_route.items()):
         m = RE_ROUTE_CODE.search(r)
         if m:
-            for code in set(m.groups()): users[code].append(ids)
-    cand = {c: set.intersection(*v) for c, v in users.items()}
-    byid = {id(e): e for e in all_areas}
+            for code in sorted(set(m.groups())): users[code].append(ids)
+    cand = {c: set.intersection(*v) for c, v in sorted(users.items())}
     defaults = {e['city'][:3] for e in all_areas if e.get('city')}
+    starts = lambda i, c: (all_areas[i].get('city') or '').startswith(c)
     assigned = {}
-    for _ in range(len(cand) + 1):
+    for c, s in cand.items():                       # 1. codes confirmed by a default city name
+        own = sorted(i for i in s if starts(i, c))
+        if len(own) == 1 and own[0] not in assigned.values(): assigned[c] = own[0]
+    changed = True
+    while changed:                                  # 2. elimination, in a fixed order
+        changed = False
         for c, s in cand.items():
             if c in assigned: continue
-            s = s - set(assigned.values())
-            own = [i for i in s if (byid[i].get('city') or '').startswith(c)]
-            if len(own) == 1 or len(s) == 1: assigned[c] = (own or list(s))[0]
-    for c, i in assigned.items():
-        e = byid[i]
+            s = sorted(s - set(assigned.values()))
+            own = [i for i in s if starts(i, c)]
+            if len(own) == 1 or len(s) == 1:
+                assigned[c] = (own or s)[0]; changed = True
+    for c, i in sorted(assigned.items()):
+        e = all_areas[i]
         if (e.get('city') or '').startswith(c):
             e['route_code'] = c
         elif e['owner'] in humans and c not in defaults:
@@ -269,7 +354,7 @@ def load_info(paths):
     m = {}
     for path in paths:
         if os.path.exists(path):
-            for k, v in json.load(open(path, encoding='utf-8')).items():
+            for k, v in read_json(path).items():
                 if k.isdigit() and isinstance(v, dict): m[int(k)] = v
     return m
 
@@ -283,8 +368,9 @@ def economy(objs, name, info):
     fac = collections.defaultdict(lambda: {'count': 0, 'working': 0, 'prod': 0.0, 'out': collections.Counter(),
                                            'in': collections.Counter()})
     for ob in objs:
-        if one(ob, 'Building') is None: continue
-        g = u(one(ob, 'guid').value)
+        gn = one(ob, 'guid')
+        if one(ob, 'Building') is None or gn is None: continue
+        g = u(gn.value)
         buildings[g] += 1
         r = one(ob, 'Residence7')
         if r is not None: residents[g] += f32(one(r, 'ResidentCount')) or 0
@@ -295,10 +381,12 @@ def economy(objs, name, info):
         x = fac[g]; x['count'] += 1; x['prod'] += prod
         if ps is not None and one(ps, 'InProgress') is not None: x['working'] += 1
         spec = (info.get(g) or {}).get('factory') or {}
-        cyc = float(spec.get('cycle') or 0)
+        try: cyc = float(spec.get('cycle') or 0)
+        except ValueError: cyc = 0
         if cyc:
-            for k, d in (('out', 'out'), ('in', 'in')):
-                for good, amt in spec.get(k, {}).items(): x[d][int(good)] += amt * 60 / cyc * prod
+            for k in ('out', 'in'):
+                for good, amt in spec.get(k, {}).items():
+                    if str(good).isdigit(): x[k][int(good)] += float(amt) * 60 / cyc * prod
     res = {}
     if buildings: res['buildings'] = {name(g): n for g, n in buildings.most_common()}
     if residents:
@@ -326,33 +414,32 @@ def areas(sroot, names, gmap, texts, ainfo=None):
     name = lambda g: gmap.get(g, f'GUID {g}')
     out = []
     for k, v in zip(info.children[0::2], info.children[1::2]):
+        if k.value is None: continue
         aid = u(k.value)
         o, cn, fert = one(v, 'OwnerProfile'), one(v, 'CityNameGuid'), one(v, 'Fertility')
         owner = u(o.value) if o is not None else None
         rs = collections.Counter()
         def walk(n):
             for c in n.children:
-                if c.name == 'RouteName': rs[c.value.decode('utf-16le', 'replace').split('\x00')[0]] += 1
+                if c.name == 'RouteName' and c.value: rs[c.value.decode('utf-16le', 'replace').split(chr(0))[0]] += 1
                 walk(c)
         walk(one(v, 'PassiveTrade') or Node('x'))
         e = {'area': aid, 'owner': owner,
              'owner_name': names.get(owner) or (gmap.get(owner) if owner is not None else None),
-             'city': texts.get(struct.unpack('<q', cn.value)[0]) if cn is not None and len(cn.value) == 8 else None,
-             'fertilities': [name(u(c.value)) for c in fert.children] if fert is not None else [],
-             'fertility_guids': [u(c.value) for c in fert.children] if fert is not None else []}
+             'city': texts.get((unpack(cn, '<q') or (None,))[0])}
+        e['fertility_guids'] = [u(c.value) for c in getattr(fert, 'children', []) if c.value]
+        e['fertilities'] = [name(g) for g in e['fertility_guids']]
         am = one(managers, f'AreaManager_{aid}') if managers is not None else None
         if am is not None:
             mm = one(am, 'AreaMoneyManager')
-            inc = one(mm, 'TotalMoneyIncomePerMinute') if mm is not None else None
-            if inc is not None: e['income_per_minute'] = round(struct.unpack('<f', inc.value)[0])
+            inc = f32(one(mm, 'TotalMoneyIncomePerMinute'))
+            if inc is not None: e['income_per_minute'] = round(inc)
             pm = one(am, 'AreaPopulationManager')
             st = one(pm, 'CurrentCityStatusGUID') if pm is not None else None
-            if st is not None: e['city_status'] = name(u(st.value))
-            aom = one(am, 'AreaObjectManager'); go = one(aom, 'GameObject') if aom is not None else None
-            objs = one(go, 'objects') if go is not None else None
-            ps = [struct.unpack('<fff', one(ob, 'Position').value) for ob in (objs.children if objs else [])
-                  if one(ob, 'Position') is not None]
-            e.update(economy(objs.children if objs else [], name, ainfo or {}))
+            if st is not None and st.value: e['city_status'] = name(u(st.value))
+            objs = area_objects(am)
+            ps = [p for p in (unpack(one(ob, 'Position'), '<fff') for ob in objs) if p]
+            e.update(economy(objs, name, ainfo or {}))
             if ps:
                 xs, zs = [p[0] for p in ps], [p[2] for p in ps]
                 e['objects'] = len(ps)
@@ -360,7 +447,7 @@ def areas(sroot, names, gmap, texts, ainfo=None):
                 e['extent'] = [round(min(xs)), round(min(zs)), round(max(xs)), round(max(zs))]
         eco = one(v, 'AreaEconomy')
         sl = one(eco, 'StrgLrg') if eco is not None else None
-        if sl is not None:
+        if sl is not None and sl.value:
             goods = sorted(((g, n) for g, n in storage(sl.value).items() if n), key=lambda x: -x[1])
             e['storage'] = {name(g): n for g, n in goods}
             e['storage_guids'] = {str(g): n for g, n in goods}
@@ -368,31 +455,98 @@ def areas(sroot, names, gmap, texts, ainfo=None):
         out.append(e)
     return out
 
+def ship_index(sroot):
+    """MetaID -> (ship GUID, x, z) for every ship of a session."""
+    out = {}
+    for ob in session_objects(sroot):
+        mid, gn = one(one(ob, 'MetaPersistent'), 'MetaID'), one(ob, 'guid')
+        if one(ob, 'ShipModuleOwner') is not None and mid is not None and gn is not None:
+            x, _, z = unpack(one(ob, 'Position'), '<fff') or (0, 0, 0)
+            out[u(mid.value)] = (u(gn.value), round(x), round(z))
+    return out
+
+def trade_routes(data_root):
+    """Trade routes of all players, from MetaGameManager/SessionTradeRouteManager/RouteMap.
+    Ships are listed by MetaID (uint64 each); stations by area id with the goods set there."""
+    rm = one(one(meta_root(data_root), 'SessionTradeRouteManager'), 'RouteMap')
+    out = []
+    for k, t in zip(rm.children[0::2], rm.children[1::2]) if rm is not None else []:
+        nm, sh, ow = one(t, 'Name'), one(t, 'Ships'), one(t, 'Owner')
+        sv = sh.value if sh is not None and sh.value else b''
+        stations = []
+        for st in getattr(one(t, 'Stations'), 'children', []):
+            goods = {}
+            for g in getattr(one(st, 'GoodInfos'), 'children', []):
+                pg, am = one(g, 'ProductGUID'), unpack(one(g, 'Amount'), '<i')
+                if pg is not None and pg.value: goods[u(pg.value)] = am[0] if am else None
+            ar = one(st, 'AreaID')
+            stations.append({'area': u(ar.value) if ar is not None and ar.value else None, 'goods': goods})
+        if k.value is None: continue
+        out.append({'id': u(k.value), 'name': nm.value.decode('utf-16le', 'replace').rstrip(chr(0)) if nm is not None else None,
+                    'owner': u(ow.value) if ow is not None else None,
+                    'ships': [u(sv[i:i + 8]) for i in range(0, len(sv) - 7, 8)], 'stations': stations})
+    return out
+
+def attach_routes(results, routes, ships, names, gmap):
+    """Name each route's ships and stations and add it to every session it stops in.
+    Area ids are only unique within a session: a station goes to the session of the route's
+    ships when its id exists in several."""
+    by_area = collections.defaultdict(list)
+    for r in results:
+        for e in r['areas']: by_area[e['area']].append((r['session'], e))
+    def best(cands, rt, ship_sessions):
+        # the area that recorded this route by name, else the owner's area, else the ships' session
+        for test in (lambda c: rt['name'] in c[1].get('trade_routes', {}),
+                     lambda c: c[1].get('owner') == rt['owner'] and c[0] in ship_sessions,
+                     lambda c: c[1].get('owner') == rt['owner'],
+                     lambda c: c[0] in ship_sessions):
+            hit = [c for c in cands if test(c)]
+            if len(hit) == 1: return hit[0]
+        return cands[0] if len(cands) == 1 else None
+    name = lambda g: gmap.get(g, f'GUID {g}')
+    for rt in routes:
+        sh = [ships.get(m) for m in rt['ships']]
+        ship_sessions = {x[0] for x in sh if x}
+        stops, where = [], set()
+        for st in rt['stations']:
+            pick = best(by_area.get(st['area'], []), rt, ship_sessions)
+            e = pick[1] if pick else {}
+            if pick: where.add(pick[0])
+            stops.append({'area': st['area'], 'session': pick[0] if pick else None,
+                          'city': e.get('custom_name') or e.get('city'),
+                          'goods': {name(g): n for g, n in st['goods'].items()}})
+        row = {'id': rt['id'], 'name': rt['name'], 'owner': rt['owner'],
+               'owner_name': names.get(rt['owner']) or gmap.get(rt['owner']),
+               'ships': [{'type': name(x[1]), 'guid': x[1], 'session': x[0], 'position': [x[2], x[3]]} if x
+                         else {'meta_id': m} for m, x in zip(rt['ships'], sh)],
+               'stations': stops}
+        for r in results:                   # no station resolved: show it where its ships are
+            if r['session'] in (where or ship_sessions): r.setdefault('trade_routes', []).append(row)
+
 def cmd_extract(a):
     os.makedirs(a.output, exist_ok=True)
     paths = a.names if a.names else ['guid_names.json'] if os.path.exists('guid_names.json') else []
     gmap, info = load_names(paths), load_info(paths)
-    files = rda_files(a.save)
-    data_root = filedb(zlib.decompress(files['data.a7s']))
+    data_root = load_save(a.save)
     owners, names = meta_map(data_root)
     utexts = user_texts(data_root)
     texts = read_texts(a.texts) if a.texts else {}   # resolves the areas' default city names
-    results = []
-    for s in one(data_root.children[0], 'GameSessions').children:
-        sd, desc = one(s, 'SessionData'), one(s, 'SessionDesc')
-        if sd is None: continue
-        sg = u(one(desc, 'SessionGUID').value)
-        label = KNOWN_SESSIONS.get(sg) or re.sub(r'\W+', '_', gmap.get(sg, f'session_{sg}')).lower()
-        sroot = filedb(one(sd, 'BinaryData').value)
+    results, ships, seen = [], {}, set()
+    for sg, sroot in save_sessions(data_root):
+        label = session_label(sg, gmap)
+        if label in seen: label = f'{label}_{sg}'          # two sessions with the same name
+        seen.add(label)
+        ships.update({m: (label,) + v for m, v in ship_index(sroot).items()})
         results.append({'session': label, 'session_guid': sg, 'save': os.path.basename(a.save),
-                        **session(sroot, owners, names, gmap, a.radius),
+                        **session(sroot, owners, names, gmap, a.radius, texts),
                         'areas': areas(sroot, names, gmap, texts, info)})
     # trade routes cross provinces, so cities are matched to route codes over the whole save
     name_cities([e for r in results for e in r['areas']], utexts, {p for p, n in names.items() if n})
+    attach_routes(results, trade_routes(data_root), ships, names, gmap)
     for res in results:
         label = res['session']
         p = os.path.join(a.output, label + '.json')
-        json.dump(res, open(p, 'w', encoding='utf-8'), ensure_ascii=False, indent=2)
+        write_json(p, res, 2)
         print(f'{label}: {sum(x["ship_count"] for x in res["participants"])} ships, '
               f'{len(res["participants"])} owners, {len(res["pirates"])} pirate factions, '
               f'{len(res["areas"])} areas -> {p}')
@@ -441,14 +595,23 @@ def collect_xml(path, dest, lang):
                 data = get()
             except Exception as e:
                 print(f'  ! {n} in {rda}: extraction failed ({e})', file=sys.stderr); continue
-            open(out, 'wb').write(data)
+            with open(out, 'wb') as fo: fo.write(data)
             print(f'  + {n}  ({len(data) / 1e6:.1f} MB, from {os.path.basename(rda)})')
             found[k].append(out)
+        entries.close()
     return found
 
 def txt(el, tag):
     x = el.find(tag) if el is not None else None
     return x.text.strip() if x is not None and x.text else None
+
+def num(v, default=None):
+    """Number from XML text: int when integral, float otherwise, default when missing or invalid."""
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return default
+    return int(f) if f.is_integer() else f
 
 def read_assets(files):
     assets = {}
@@ -465,7 +628,7 @@ def read_assets(files):
                          'text_id': txt(el, 'Values/CityStatus/CityStatusName') or txt(el, 'Values/Text/OasisId')}
                     fb = el.find('Values/FactoryBase')
                     if fb is not None:   # production: goods per cycle, cycle time in seconds
-                        io_ = lambda tag: {txt(i, 'Product'): int(txt(i, 'Amount') or 1)
+                        io_ = lambda tag: {txt(i, 'Product'): num(txt(i, 'Amount'), 1)
                                            for i in fb.findall(tag + '/Item') if txt(i, 'Product')}
                         fac = {'in': io_('FactoryInputs'), 'out': io_('FactoryOutputs'), 'cycle': txt(fb, 'CycleTime')}
                         a['factory'] = {k: v for k, v in fac.items() if v}
@@ -501,13 +664,24 @@ def cmd_assets(a):
     assets, texts = read_assets(xml['assets']), read_texts(xml['texts'])
     default_cycle = None                 # FactoryBase/CycleTime when an asset does not set it
     for f in xml['props']:
-        m = re.search(r'<FactoryBase>.*?<CycleTime>(\d+)</CycleTime>', open(f, encoding='utf-8', errors='replace').read(), re.S)
+        m = re.search(r'<FactoryBase>(?:(?!</FactoryBase>).)*?<CycleTime>\s*([\d.]+)\s*</CycleTime>', read_text(f), re.S)
         if m: default_cycle = m.group(1)
+
+    def base_of(x):
+        b = x.get('base')
+        return int(b) if b and b.isdigit() else None
 
     def inherited(g, key, depth=0):   # assets with a BaseAssetGUID inherit missing values from the base
         x = assets.get(g, {})
-        if x.get(key) or depth > 20 or not x.get('base'): return x.get(key)
-        return inherited(int(x['base']), key, depth + 1)
+        if x.get(key) or depth > 20 or base_of(x) is None: return x.get(key)
+        return inherited(base_of(x), key, depth + 1)
+
+    def factory(g, depth=0):          # merged per key: a derived asset may override only CycleTime
+        x = assets.get(g, {})
+        own = dict(x.get('factory') or {})
+        if depth <= 20 and base_of(x) is not None:
+            for k, v in factory(base_of(x), depth + 1).items(): own.setdefault(k, v)
+        return own
 
     out = {}
     for g, x in assets.items():
@@ -516,26 +690,29 @@ def cmd_assets(a):
         local = texts.get(int(tid)) if tid and tid.lstrip('-').isdigit() else texts.get(g)
         if local: x['name_local'] = local
         if inherited(g, 'template'): x['template'] = inherited(g, 'template')
-        if inherited(g, 'factory'):
-            x['factory'] = dict(inherited(g, 'factory'))
-            if 'cycle' not in x['factory'] and default_cycle: x['factory']['cycle'] = default_cycle
+        fac = factory(g)
+        if fac:
+            x['factory'] = fac
+            if 'cycle' not in fac and default_cycle: fac['cycle'] = default_cycle
         if a.all or 'factory' in x or RE_USEFUL.search(x.get('template') or '') or RE_USEFUL.search(x.get('name') or ''):
             out[str(g)] = x
     out = dict(sorted(out.items(), key=lambda kv: int(kv[0])))
-    json.dump(out, open(a.output, 'w', encoding='utf-8'), ensure_ascii=False, indent=1)
+    write_json(a.output, out, 1)
     print(f'\n{len(out)} GUIDs written to {a.output} ({len(assets)} assets, {len(texts)} {a.lang} texts)')
 
 def cmd_list(a):
     f = (a.filter or '').lower()
     for rda in find_rda(a.path):
         try:
-            for n, _ in rda_entries(rda):
-                if f in n.lower(): print(f'{os.path.basename(rda)}: {n}')
+            with rda_entries(rda) as entries:
+                for n, _ in entries:
+                    if f in n.lower(): print(f'{os.path.basename(rda)}: {n}')
         except Exception as e:
             print(f'  ! {rda}: {e}', file=sys.stderr)
 
 def cmd_guid_table(a):
-    m = json.load(open(a.names, encoding='utf-8'))
+    m = read_json(a.names)
+    if os.path.dirname(a.output): os.makedirs(os.path.dirname(a.output), exist_ok=True)
     esc = lambda s: (s or '').replace('|', '\\|')
     rows = sorted(((int(k), v) for k, v in m.items() if k.isdigit()),
                   key=lambda kv: ((kv[1].get('template') or '~') if isinstance(kv[1], dict) else '~', kv[0]))
@@ -546,7 +723,8 @@ def cmd_guid_table(a):
     for g, v in rows:
         v = v if isinstance(v, dict) else {'name': v}
         lines.append(f'| {g} | {esc(v.get("name"))} | {esc(v.get("name_local"))} | {esc(v.get("template"))} |')
-    open(a.output, 'w', encoding='utf-8').write('\n'.join(lines) + '\n')
+    with open(a.output, 'w', encoding='utf-8') as f:
+        f.write('\n'.join(lines) + '\n')
     print(f'{len(rows)} rows -> {a.output}')
 
 # ---------------- map ----------------
@@ -564,8 +742,9 @@ def template_tiles(sroot):
         e = one(t, 'Element')
         f = one(e, 'MapFilePath') if e is not None else None
         if f is None: continue
-        r = one(e, 'Rotation90')
-        out.append({'pos': struct.unpack('<ii', one(e, 'Position').value),
+        r, pos = one(e, 'Rotation90'), unpack(one(e, 'Position'), '<ii')
+        if pos is None: continue
+        out.append({'pos': pos,
                     'dir': os.path.dirname(f.value.decode('utf-16le').rstrip('\0').replace('\\', '/')).lower(),
                     'rot': r.value[0] if r is not None and r.value else 0})
     return out
@@ -573,23 +752,35 @@ def template_tiles(sroot):
 def tile_layers(tiles, game):
     """Find each tile's MapSize, active grid and map image in the game's archives."""
     from PIL import Image
-    dirs = {t['dir']: t for t in tiles}
+    dirs = collections.defaultdict(list)           # a tile file may be placed several times
+    for t in tiles: dirs[t['dir']].append(t)
+    natural = lambda p: [int(x) if x.isdigit() else x for x in re.split(r'(\d+)', os.path.basename(p).lower())]
     rdas = [p for p in find_rda(game) if re.search(r'provinces|patch', os.path.basename(p), re.I)]
+    rdas.sort(key=lambda p: ('patch' in os.path.basename(p).lower(), natural(p)))   # patches last: they win
     for rda in rdas:
         print(f'  reading {os.path.basename(rda)} ...')
-        for n, get in rda_entries(rda):
+        try:
+            entries = rda_entries(rda)
+        except BAD_ARCHIVE as e:
+            print(f'  ! {rda}: {e}', file=sys.stderr); continue
+        for n, get in entries:
             nl = n.lower()
             d = nl.rsplit('/_gamedata/', 1)[0] if '/_gamedata/' in nl else os.path.dirname(nl)
-            t = dirs.get(d)
-            if t is None: continue
-            if nl.endswith('.a7minfo'):
-                r = filedb(get())
-                t['size'] = struct.unpack('<ii', one(r, 'MapSize').value)
-                g = one(r, 'ActiveMapGrid')
-                if g is not None:
-                    t['grid'] = (u(one(g, 'x').value), u(one(g, 'y').value), one(g, 'bits').value)
-            elif nl.endswith('/mapimage_0.dds'):
-                t['img'] = Image.open(io.BytesIO(get())).convert('RGB')   # later archives (patches) win
+            if d not in dirs: continue
+            try:
+                if nl.endswith('.a7minfo'):
+                    r = filedb(get())
+                    size, g = unpack(one(r, 'MapSize'), '<ii'), one(r, 'ActiveMapGrid')
+                    gx, gy, bits = one(g, 'x'), one(g, 'y'), one(g, 'bits')
+                    for t in dirs[d]:
+                        if size: t['size'] = size
+                        if None not in (gx, gy, bits): t['grid'] = (u(gx.value), u(gy.value), bits.value)
+                elif nl.endswith('/mapimage_0.dds'):
+                    img = Image.open(io.BytesIO(get())).convert('RGB')
+                    for t in dirs[d]: t['img'] = img
+            except (BAD_ARCHIVE + (IndexError, KeyError)) as e:
+                print(f'  ! {n}: {e}', file=sys.stderr)
+        entries.close()
     return [t for t in tiles if 'size' in t and 'img' in t]
 
 def compose_terrain(tiles):
@@ -621,18 +812,11 @@ def cmd_map(a):
         sys.exit('The map command needs Pillow: pip install pillow')
     paths = a.names if a.names else ['guid_names.json'] if os.path.exists('guid_names.json') else []
     gmap, info = load_names(paths), load_info(paths)
-    files = rda_files(a.save)
-    data_root = filedb(zlib.decompress(files['data.a7s']))
+    data_root = load_save(a.save)
     owners, names = meta_map(data_root)
     texts = read_texts(a.texts) if a.texts else {}
-    sessions = []
-    for s in one(data_root.children[0], 'GameSessions').children:
-        sd, desc = one(s, 'SessionData'), one(s, 'SessionDesc')
-        if sd is None: continue
-        sg = u(one(desc, 'SessionGUID').value)
-        label = KNOWN_SESSIONS.get(sg) or re.sub(r'\W+', '_', gmap.get(sg, f'session_{sg}')).lower()
-        root = filedb(one(sd, 'BinaryData').value)
-        sessions.append((label, sg, root, areas(root, names, gmap, texts, info)))
+    sessions = [(session_label(sg, gmap), sg, root, areas(root, names, gmap, texts, info))
+                for sg, root in save_sessions(data_root)]
     name_cities([e for s in sessions for e in s[3]], user_texts(data_root), {p for p, n in names.items() if n})
     pick = [s for s in sessions if a.session in (s[0], str(s[1]))]
     if not pick: sys.exit('Unknown session; available: ' + ', '.join(f'{s[0]} ({s[1]})' for s in sessions))
@@ -651,15 +835,14 @@ def cmd_map(a):
     humans = {p for p, n in names.items() if n}
     gsm = one(sroot, 'GameSessionManager')
     pirates, objs = set(), []
-    for am in one(gsm, 'AreaManagers').children:
-        aid = int(am.name.split('_')[-1]) if am.name.startswith('AreaManager_') else None
-        aom = one(am, 'AreaObjectManager'); go = one(aom, 'GameObject') if aom is not None else None
-        ob_list = one(go, 'objects') if go is not None else None
-        for ob in (ob_list.children if ob_list else []):
-            if one(ob, 'Pirate') is not None: pirates.add(u(one(ob, 'guid').value))
-            p = one(ob, 'Position')
+    for am in area_managers(sroot):
+        aid = int(am.name.split('_')[-1]) if re.fullmatch(r'AreaManager_\d+', am.name) else None
+        for ob in area_objects(am):
+            gn = one(ob, 'guid')
+            if one(ob, 'Pirate') is not None and gn is not None: pirates.add(u(gn.value))
+            p = unpack(one(ob, 'Position'), '<fff')
             if p is None: continue
-            x, _, z = struct.unpack('<fff', p.value)
+            x, _, z = p
             mp = one(ob, 'MetaPersistent'); mid = one(mp, 'MetaID') if mp is not None else None
             kind = 'ship' if one(ob, 'ShipModuleOwner') is not None else 'unit' if one(ob, 'Unit') is not None else 'building'
             objs.append((kind, owners.get(u(mid.value)) if mid is not None else None, aid, x, z))
@@ -680,6 +863,7 @@ def cmd_map(a):
         for p in hits: chosen[p] = rgb
     near = lambda c1, c2: sum((x - y) ** 2 for x, y in zip(c1, c2)) < 90 ** 2
     taken = list(chosen.values()) + [(230, 40, 40)]                   # pirate red stays unique
+    taken += [(255, 215, 0)] if any(p not in chosen for p in humans) else []   # default human gold
     free = [c for c in OWNER_COLORS if not any(near(c, x) for x in taken)] or OWNER_COLORS
     palette = {}                                                       # same name, same colour
     for p in others:
@@ -717,7 +901,8 @@ def cmd_map(a):
         rows += [((255, 60, 60), 'pirate structures (x)'), (grey, 'nobody / unknown')]
         lf = font(max(14, H // 100)); lh = lf.size + 8 if hasattr(lf, 'size') else 20
         bx, by = 20, 20
-        d.rectangle((bx - 10, by - 10, bx + 420, by + lh * (len(rows) + 2)), fill=(0, 0, 0))
+        bw = max(d.textlength(t, font=lf) for t in [f'{label}: ships = triangles, units = squares'] + [r[1] for r in rows]) + 40
+        d.rectangle((bx - 10, by - 10, bx + bw, by + lh * (len(rows) + 2)), fill=(0, 0, 0))
         d.text((bx, by), f'{label}: ships = triangles, units = squares', font=lf, fill=(255, 255, 255))
         for i, (c, t) in enumerate(rows, 1):
             d.rectangle((bx, by + i * lh + 3, bx + 16, by + i * lh + 19), fill=c)
@@ -742,7 +927,7 @@ def main():
     s.add_argument('path', help='Anno 117 "maindata" folder, a single .rda (config.rda is enough), or a folder of extracted .xml')
     s.add_argument('-o', '--output', default='guid_names.json')
     s.add_argument('--lang', default='english', help='text language, as in texts_<lang>.xml (default english)')
-    s.add_argument('--all', action='store_true', help='keep every asset, not only military/naval ones')
+    s.add_argument('--all', action='store_true', help='keep every asset (default: military, naval, participant, session, fertility, city status, production)')
     s.add_argument('--extract-dir', default='extracted', help='where to save the extracted .xml files')
     l = sub.add_parser('list', help='list files inside .rda archives')
     l.add_argument('path'); l.add_argument('filter', nargs='?')

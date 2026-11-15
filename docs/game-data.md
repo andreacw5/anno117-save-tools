@@ -19,16 +19,21 @@ Language archives such as `en_us0.rda` only hold voice-over sound banks; they ar
 ## What `assets` does
 
 1. Opens each `.rda` with `mmap` and reads **only the index**, so multi-GB archives are fine.
-2. Extracts only files matching `assets*.xml` and `texts_<lang>*.xml`, wherever they are in the
-   archive, into `extracted/`.
+2. Extracts only files matching `assets*.xml`, `texts_<lang>*.xml` and `export/properties.xml`
+   (default component values, such as the 30 s production cycle), wherever they are in the
+   archive, into `extracted/` (`--extract-dir`).
 3. Parses them and writes `guid_names.json`:
 
    ```json
-   {"37224": {"name": "…", "template": "…", "name_local": "…"}}
+   {"37224": {"name": "…", "template": "…", "name_local": "…"},
+    "152375": {"name": "…", "template": "Production", "name_local": "…",
+               "factory": {"in": {"2068": 1}, "out": {"2136": 1}, "cycle": "60"}}}
    ```
 
-   Assets without `<Template>` inherit it from their `BaseAssetGUID`. Without `--all`, only naval,
-   military, participant and session assets are kept.
+   Assets without `<Template>` inherit it, the name's text id and production data from their
+   `BaseAssetGUID` (production key by key: a derived asset may override only `CycleTime`).
+   Without `--all`, only naval, military, participant, session, fertility, city status and
+   production assets are kept.
 4. `extract` then picks `guid_names.json` up automatically (`--names` to point elsewhere).
 
 You can also point `assets` at a folder of `.xml` files already extracted with another tool,
@@ -57,7 +62,8 @@ with the output.
 
 Each province's terrain is assembled from tiles listed in the save's
 `GameSessionManager/MapTemplate` (`TemplateElement/Element`: `Position`, `MapFilePath`, `Rotation90`).
-A tile is a folder in the `*provinces*.rda` archives:
+A tile is a folder in the `*provinces*.rda` archives (patch archives `*patch*.rda` are read
+after them and win):
 
 | File | Content |
 |---|---|

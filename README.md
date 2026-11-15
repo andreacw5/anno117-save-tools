@@ -4,9 +4,9 @@ Read **Anno 117: Pax Romana** save games (`.a8s`) and game data (`.rda`) with a 
 No dependencies, Python 3.8 or newer.
 
 - **`extract`**: turn a save into one JSON file per province, listing every participant's ships
-  (type, installed modules, map position, squadrons) and land units, pirate factions, and every
+  (type, name, installed modules, map position, squadrons) and land units, pirate factions, every
   island (owner, fertilities and deposits, warehouse stock, buildings, population, production per
-  minute, income, city status, trade routes).
+  minute, income, city status) and the trade routes with their ships and stops.
 - **`assets`**: pull the official GUID → name map out of your own copy of the game.
 - **`map`**: draw a province as a PNG, from the save's map template and the game's own map tiles,
   with islands, buildings, ships and units coloured by owner and pirate structures marked.
@@ -26,7 +26,8 @@ python anno117.py assets "<Anno 117 install>/maindata/config.rda" --lang english
 
 # 2. Extract a save (uses guid_names.json from step 1 if present;
 #    --texts adds the islands' default city names)
-python anno117.py extract "path/to/Autosave_0001.a8s" -o sessions \n    --texts extracted/config/data/base/config/gui/texts_english.xml
+python anno117.py extract "path/to/Autosave_0001.a8s" -o sessions \
+    --texts extracted/config/data/base/config/gui/texts_english.xml
 ```
 
 The game's installation path depends on your launcher. Point `assets` at the folder that contains the `.rda` archives.
@@ -81,8 +82,19 @@ Output (`sessions/<province>.json`, abridged):
 | City names | ⚠️ default names exact; renamed cities **inferred** from trade route codes |
 | Province maps (`map`) | ✅ tested on three provinces; tile seams are visible |
 | Buildings, population, production per minute | ✅ tested on real saves; residents' consumption not included |
+| Trade routes: ships, stops, goods | ✅ tested on real saves; load/unload direction not decoded |
+| Ship names | ✅ from `texts_<lang>.xml` (pass `--texts`) |
 
 Reports and pull requests are welcome, especially output of `list` on your game's `maindata` folder.
+
+## Tests
+
+```sh
+python -m unittest discover -s tests -v
+```
+
+The tests build small RDA archives, FileDB trees and XML files in memory, so no game files are
+needed. Python 3.8 or newer.
 
 ## How it works
 

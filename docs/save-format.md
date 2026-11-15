@@ -84,7 +84,7 @@ and a set of components:
 | `Unit` without ship modules | **land unit** |
 | `Pirate` | a pirate faction (raids, area of activity, base, warship count) |
 | `Health/LastDamageDealerOwner` | who last damaged the object |
-| `Nameable/VehicleTextGuid` | ship name, as a **reference** to the game's name list, not text |
+| `Nameable/VehicleTextGuid` | ship name: `int64` `LineId` in `texts_<lang>.xml`; `VehicleTextIterator` counts reuses of the name (1 = none, 3 = "III", inferred) |
 
 ### Owner
 
@@ -166,16 +166,43 @@ name starts with it, or the area belongs to a player with a custom company name 
 typed text starts with it (`custom_name`; several matches give `custom_name_candidates`). Treat it
 as a guess.
 
-## 6. What cannot be read from the save alone
+### Residents' consumption (not computed)
+
+Each house type lists its needs in `assets.xml` under `Values/Residence7/NeedsList` (`Need` +
+`NeedConsumptionRate`), and each `Need` asset points to its good (`Values/Need/NeedProduct`). The
+unit of `NeedConsumptionRate` is not confirmed: read as "per resident per minute" it gives about 5×
+what the game's own production and full warehouses suggest, and Anno 117's optional needs (one
+good *or* another satisfies the same need) split consumption between goods. Until this is
+verified, `extract` does not include residents in `goods_per_minute`.
+
+## 6. Trade routes
+
+`MetaGameManager/SessionTradeRouteManager/RouteMap` holds every player's routes as pairs (route
+id, route):
+
+| Field | Meaning |
+|---|---|
+| `Name` | UTF-16 route name (`"Flax Kan - Mem"`) |
+| `Owner` | participant GUID |
+| `Ships` | the ships' `MetaPersistent/MetaID`s, one `uint64` each |
+| `Stations/t1` | stops: `AreaID` (`uint16`, an area id of some session), `AreaOwner`, `GoodInfos/t1` with `ProductGUID` and `Amount` (`int32`) |
+
+`extract` resolves ships through their `MetaID` (all ships in the saves we tested were found) and
+stations through the area ids. Area ids are unique only within a session: when an id exists in
+several sessions, the station goes to the session of the route's ships. Each route is added, as
+`trade_routes`, to every session it stops in. Whether a good is loaded or unloaded at a station is
+**not decoded**: `Amount` is the value set for that good at that stop.
+
+## 7. What cannot be read from the save alone
 
 - **Type names.** Saves contain only numeric GUIDs. Names live in the game data:
   see [Game data and GUID names](game-data.md).
-- **Ship and city names.** They are text references (`VehicleTextGuid`, `CityNameGuid`): see above for city names.
+- **Renamed cities.** Default city and ship names resolve through `texts_<lang>.xml`; typed city names are inferred (see above).
   Trade route names (`RouteName`), however, are plain UTF-16 text and contain the first three
   letters of each city (for example `Hemp Kan - Mem`).
-- **Why buildings are idle**, and residents' consumption per minute.
+- **Why buildings are idle**, residents' consumption per minute, load/unload direction on trade routes.
 
-## 7. Known limits of `extract`
+## 8. Known limits of `extract`
 
 - Squadrons are a greedy distance clustering (`--radius`), not the game's own fleet groups.
 - Objects whose `MetaID` is not in the `MetaObjectMap` are reported under an `unknown owner`.
