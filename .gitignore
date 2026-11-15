@@ -1,0 +1,9 @@
+# Never commit game files or personal saves
+*.a8s
+*.a7s
+*.rda
+extracted/
+sessions/
+guid_names.json
+__pycache__/
+*.pyc
