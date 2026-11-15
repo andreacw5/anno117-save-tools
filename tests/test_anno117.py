@@ -516,5 +516,21 @@ class TestCityNames(TempDirMixin, unittest.TestCase):
         self.assertEqual(a, {'area': 10, 'owner': 41})
 
 
+class TestRouteFlows(unittest.TestCase):
+    def test_supplier_is_the_stop_that_produces_the_good(self):
+        # the hub also has a few sheep farms; the farm island has more, all idle at save time
+        hub = {'area': 1, 'owner': 41, 'custom_name': 'Portus', 'output_capacity': {'Sheep': 4.0}}
+        farm = {'area': 2, 'owner': 41, 'city': 'Aeretia', 'output_capacity': {'Flax': 3.0, 'Sheep': 8.0}}
+        results = [{'session': 'latium', 'areas': [hub, farm]}]
+        # route named with the hub first, as in the game: the name does not give the direction
+        routes = [{'id': 7, 'name': 'Flax Por - Aer', 'owner': 41, 'ships': [],
+                   'stations': [{'area': 1, 'goods': {10: 50}}, {'area': 2, 'goods': {10: 50, 11: 50}}]}]
+        A.attach_routes(results, routes, {}, {41: 'Me'}, {10: 'Flax', 11: 'Sheep'})
+        self.assertEqual(farm['supplies'], {'Flax': ['Portus'], 'Sheep': ['Portus']})
+        self.assertEqual(hub['receives'], {'Flax': ['Aeretia'], 'Sheep': ['Aeretia']})
+        self.assertNotIn('supplies', hub)
+        self.assertEqual(results[0]['trade_routes'][0]['stations'][0]['city'], 'Portus')
+
+
 if __name__ == '__main__':
     unittest.main()

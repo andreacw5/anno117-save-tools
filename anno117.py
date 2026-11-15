@@ -14,9 +14,10 @@ Commands:
         (default guid_names.json), with templates and production data (inputs, outputs, cycle).
         By default only military, naval, participant, session, fertility, city status and
         production assets are kept; --all keeps everything.
-  map <save.a8s> <maindata> [--session S] [-o FILE] [--color WHO=COLOUR ...] [--legend]
+  map <save.a8s> <maindata> [--session S] [-o FILE] [--color WHO=COLOUR ...] [--legend] [--no-routes]
         PNG map of a province: the game's map tiles placed as in the save's MapTemplate, plus
-        buildings, ships and units coloured by owner and island names with their owner.
+        buildings, ships and units coloured by owner, island names with their owner, and the
+        human players' trade routes as dashed lines.
         Needs Pillow (the only optional dependency).
   list <file.rda | dir> [FILTER]
         List the files contained in .rda archives (handy when `assets` finds nothing).
@@ -379,7 +380,7 @@ def economy(objs, name, info):
     amount x 60 / cycle time x current productivity (Factory7/CurrentProductivity, 1.0 = 100%)."""
     buildings, residents = collections.Counter(), collections.Counter()
     fac = collections.defaultdict(lambda: {'count': 0, 'working': 0, 'prod': 0.0, 'out': collections.Counter(),
-                                           'in': collections.Counter()})
+                                           'in': collections.Counter(), 'cap': collections.Counter()})
     for ob in objs:
         gn = one(ob, 'guid')
         if one(ob, 'Building') is None or gn is None: continue
@@ -400,21 +401,26 @@ def economy(objs, name, info):
             for k in ('out', 'in'):
                 for good, amt in spec.get(k, {}).items():
                     if str(good).isdigit(): x[k][int(good)] += float(amt) * 60 / cyc * prod
+            for good, amt in spec.get('out', {}).items():   # what the building makes at 100%
+                if str(good).isdigit(): x['cap'][int(good)] += float(amt) * 60 / cyc
     res = {}
     if buildings: res['buildings'] = {name(g): n for g, n in buildings.most_common()}
     if residents:
         res['population'] = round(sum(residents.values()))
         res['residents'] = {name(g): round(n) for g, n in residents.most_common()}
     if fac:
-        rows, net = [], collections.Counter()
+        rows, net, cap = [], collections.Counter(), collections.Counter()
         for g, x in sorted(fac.items(), key=lambda kv: -kv[1]['count']):
             row = {'building': name(g), 'guid': g, 'count': x['count'], 'working': x['working'],
                    'productivity': round(x['prod'] / x['count'], 2)}
             if x['out']: row['output_per_minute'] = {name(k): round(v, 2) for k, v in x['out'].items()}
             if x['in']: row['input_per_minute'] = {name(k): round(v, 2) for k, v in x['in'].items()}
+            if x['cap']: row['capacity_per_minute'] = {name(k): round(v, 2) for k, v in x['cap'].items()}
             rows.append(row)
+            cap.update(x['cap'])
             net.update(x['out']); net.subtract(x['in'])
         res['production'] = rows
+        res['output_capacity'] = {name(k): round(v, 2) for k, v in cap.most_common()}
         res['goods_per_minute'] = {name(k): round(v, 2) for k, v in sorted(net.items(), key=lambda kv: -kv[1]) if abs(v) > 0.005}
     return res
 
@@ -503,7 +509,10 @@ def trade_routes(data_root):
 def attach_routes(results, routes, ships, names, gmap):
     """Name each route's ships and stations and add it to every session it stops in.
     Area ids are only unique within a session: a station goes to the session of the route's
-    ships when its id exists in several."""
+    ships when its id exists in several.
+    Also fills each area's `supplies` / `receives` ({good: [cities]}): the save does not say which
+    stop loads a good, so a good goes *from* the stop with the largest production capacity for it
+    (output_capacity: its buildings at 100%, so idle farms still count) *to* the route's other stops."""
     by_area = collections.defaultdict(list)
     for r in results:
         for e in r['areas']: by_area[e['area']].append((r['session'], e))
@@ -517,14 +526,20 @@ def attach_routes(results, routes, ships, names, gmap):
             if len(hit) == 1: return hit[0]
         return cands[0] if len(cands) == 1 else None
     name = lambda g: gmap.get(g, f'GUID {g}')
+    city = lambda e: e.get('custom_name') or e.get('city') or f"area {e.get('area')}"
+    flows = collections.defaultdict(lambda: {'supplies': collections.defaultdict(set),
+                                             'receives': collections.defaultdict(set)})
+    areas_by_id = {}
     for rt in routes:
         sh = [ships.get(m) for m in rt['ships']]
         ship_sessions = {x[0] for x in sh if x}
-        stops, where = [], set()
+        stops, where, visited = [], set(), []
         for st in rt['stations']:
             pick = best(by_area.get(st['area'], []), rt, ship_sessions)
             e = pick[1] if pick else {}
-            if pick: where.add(pick[0])
+            if pick:
+                where.add(pick[0]); visited.append((e, {name(g) for g in st['goods']}))
+                areas_by_id[id(e)] = e
             stops.append({'area': st['area'], 'session': pick[0] if pick else None,
                           'city': e.get('custom_name') or e.get('city'),
                           'goods': {name(g): n for g, n in st['goods'].items()}})
@@ -535,6 +550,18 @@ def attach_routes(results, routes, ships, names, gmap):
                'stations': stops}
         for r in results:                   # no station resolved: show it where its ships are
             if r['session'] in (where or ship_sessions): r.setdefault('trade_routes', []).append(row)
+        capacity = lambda e, g: (e.get('output_capacity') or {}).get(g, 0)
+        for e, goods in visited:
+            for g in goods:
+                best_cap = max(capacity(x, g) for x, _ in visited)
+                if best_cap <= 0 or capacity(e, g) < best_cap: continue
+                for e2, _ in visited:
+                    if e2 is e: continue
+                    flows[id(e)]['supplies'][g].add(city(e2))
+                    flows[id(e2)]['receives'][g].add(city(e))
+    for k, f in flows.items():
+        for key in ('supplies', 'receives'):
+            if f[key]: areas_by_id[k][key] = {g: sorted(v) for g, v in sorted(f[key].items())}
 
 def cmd_extract(a):
     os.makedirs(a.output, exist_ok=True)
@@ -907,6 +934,33 @@ def cmd_map(a):
         if kind == 'building' and (o or area_owner.get(aid)) in pirates:
             d.line((x - 6, H - z - 6, x + 6, H - z + 6), fill=(255, 60, 60), width=3)
             d.line((x - 6, H - z + 6, x + 6, H - z - 6), fill=(255, 60, 60), width=3)
+    if not a.no_routes:                                               # human players' trade routes
+        results = [{'session': s[0], 'areas': s[3]} for s in sessions]
+        ships = {}
+        for s in sessions: ships.update({m: (s[0],) + v for m, v in ship_index(s[2]).items()})
+        attach_routes(results, trade_routes(data_root), ships, names, gmap)
+        centers = {e['area']: e['center'] for e in area_list if 'center' in e}
+        legs = collections.Counter()
+        for rt in next(r for r in results if r['session'] == label).get('trade_routes', []):
+            if rt['owner'] not in humans: continue
+            stops = [st['area'] for st in rt['stations'] if st['session'] == label and st['area'] in centers]
+            for i in range(len(stops) - 1 if len(stops) <= 2 else len(stops)):   # routes are loops
+                p, q = stops[i], stops[(i + 1) % len(stops)]
+                if p != q: legs[(min(p, q), max(p, q), rt['owner'])] += 1
+        def dashed(p, q, fill, width, dash=18, gap=12):
+            (x1, y1), (x2, y2) = p, q
+            length = math.dist(p, q)
+            if not length: return
+            ux, uy, t = (x2 - x1) / length, (y2 - y1) / length, 0.0
+            while t < length:
+                t2 = min(t + dash, length)
+                d.line((x1 + ux * t, y1 + uy * t, x1 + ux * t2, y1 + uy * t2), fill=fill, width=width)
+                t = t2 + gap
+        for (p, q, owner), n in sorted(legs.items()):
+            pa = (centers[p][0], H - centers[p][1]); qa = (centers[q][0], H - centers[q][1])
+            w = 3 + min(n, 4)                                          # busier legs are thicker
+            dashed(pa, qa, (0, 0, 0), w + 3)
+            dashed(pa, qa, color.get(owner, (255, 215, 0)), w)
     for kind, o, aid, x, z in objs:                                   # ships: triangles, units: squares
         c = color.get(o, grey); y = H - z
         if kind == 'ship':
@@ -977,6 +1031,8 @@ def main():
     mp.add_argument('--texts', action='append', metavar='FILE', help='texts_<lang>.xml, as for extract')
     mp.add_argument('--city-names', metavar='FILE', help='your city names, as for extract')
     mp.add_argument('--width', type=int, default=1600, help='output width in pixels (default 1600)')
+    mp.add_argument('--no-routes', action='store_true',
+                   help="don't draw human players' trade routes (dashed lines between their islands)")
     mp.add_argument('--legend', action='store_true',
                    help='draw a legend box in the top-left corner (owners are always written under island names)')
     mp.add_argument('--color', action='append', metavar='WHO=COLOUR',

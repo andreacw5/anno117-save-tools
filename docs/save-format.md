@@ -140,6 +140,7 @@ stores it as `factory` and `extract` computes, per area:
 - `population` and `residents` (by house type);
 - `production`: per building type, `count`, `working` (cycle in progress), mean `productivity`,
   `output_per_minute` and `input_per_minute` = amount × 60 / cycle time × productivity;
+- `output_capacity`: what the area's production buildings make per minute at 100% productivity;
 - `goods_per_minute`: production minus factory consumption. Residents' consumption and trade
   routes are **not** included.
 
@@ -200,7 +201,13 @@ id, route):
 stations through the area ids. Area ids are unique only within a session: when an id exists in
 several sessions, the station goes to the session of the route's ships. Each route is added, as
 `trade_routes`, to every session it stops in. Whether a good is loaded or unloaded at a station is
-**not decoded**: `Amount` is the value set for that good at that stop.
+**not decoded**: `Amount` is the value set for that good at that stop, and the route name does not
+tell either (`"Flax Por - Aer"` carries flax *from* Aer *to* Por).
+
+`extract` therefore infers the direction from production capacity: a good set at a stop goes
+**from** the stop whose buildings can make the most of it (`output_capacity`, every production
+building at 100%, so farms idle at save time still count) **to** the route's other stops. Each area gets `supplies` and `receives`, `{good: [cities]}`, which shows at a glance
+what small supply islands are for.
 
 ## 7. What cannot be read from the save alone
 
