@@ -700,23 +700,28 @@ def cmd_map(a):
             d.polygon([(x, y - 9), (x - 7, y + 6), (x + 7, y + 6)], fill=c, outline=(0, 0, 0))
         elif kind == 'unit' and o is not None:
             d.rectangle((x - 5, y - 5, x + 5, y + 5), fill=c, outline=(0, 0, 0))
-    f = font(max(14, H // 90))
+    f, fs = font(max(14, H // 90)), font(max(11, H // 130))
     for e in area_list:
         if 'center' not in e: continue
         txt = e.get('custom_name') or (e.get('city') or f"area {e['area']}").replace(' Nome', '')
         x, y = e['center'][0], H - e['center'][1]
         c = color.get(e['owner'], grey)
         d.text((x, y - 22), txt, font=f, fill=c, anchor='ms', stroke_width=3, stroke_fill=(0, 0, 0))
-    # legend
-    rows = list({label_of(p): (color[p], label_of(p)) for p in present if p in color}.values())
-    rows += [((255, 60, 60), 'pirate structures (x)'), (grey, 'nobody / unknown')]
-    lf = font(max(14, H // 100)); lh = lf.size + 8 if hasattr(lf, 'size') else 20
-    bx, by = 20, 20
-    d.rectangle((bx - 10, by - 10, bx + 420, by + lh * (len(rows) + 2)), fill=(0, 0, 0))
-    d.text((bx, by), f'{label}: ships = triangles, units = squares', font=lf, fill=(255, 255, 255))
-    for i, (c, t) in enumerate(rows, 1):
-        d.rectangle((bx, by + i * lh + 3, bx + 16, by + i * lh + 19), fill=c)
-        d.text((bx + 26, by + i * lh), t, font=lf, fill=(255, 255, 255))
+        if e['owner'] is not None:                                     # owner under the island name
+            d.text((x, y - 20), str(label_of(e['owner'])), font=fs, fill=c, anchor='mt',
+                   stroke_width=2, stroke_fill=(0, 0, 0))
+    if not a.legend:
+        rows = []
+    else:
+        rows = list({label_of(p): (color[p], label_of(p)) for p in present if p in color}.values())
+        rows += [((255, 60, 60), 'pirate structures (x)'), (grey, 'nobody / unknown')]
+        lf = font(max(14, H // 100)); lh = lf.size + 8 if hasattr(lf, 'size') else 20
+        bx, by = 20, 20
+        d.rectangle((bx - 10, by - 10, bx + 420, by + lh * (len(rows) + 2)), fill=(0, 0, 0))
+        d.text((bx, by), f'{label}: ships = triangles, units = squares', font=lf, fill=(255, 255, 255))
+        for i, (c, t) in enumerate(rows, 1):
+            d.rectangle((bx, by + i * lh + 3, bx + 16, by + i * lh + 19), fill=c)
+            d.text((bx + 26, by + i * lh), t, font=lf, fill=(255, 255, 255))
     if a.width and a.width < H: im = im.resize((a.width, a.width), Image.LANCZOS)
     out = a.output or f'{label}_map.png'
     im.save(out)
@@ -750,6 +755,8 @@ def main():
     mp.add_argument('--names', action='append', metavar='FILE', help='GUID name map(s), as for extract')
     mp.add_argument('--texts', action='append', metavar='FILE', help='texts_<lang>.xml, as for extract')
     mp.add_argument('--width', type=int, default=1600, help='output width in pixels (default 1600)')
+    mp.add_argument('--legend', action='store_true',
+                   help='draw a legend box in the top-left corner (owners are always written under island names)')
     mp.add_argument('--color', action='append', metavar='WHO=COLOUR',
                    help='participant name or GUID = colour name or #rrggbb, e.g. "Dorian=yellow"; repeatable')
     a = ap.parse_args()
