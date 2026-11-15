@@ -669,8 +669,22 @@ def cmd_map(a):
     color = {p: (255, 215, 0) for p in humans}
     color.update({p: (230, 40, 40) for p in pirates})
     label_of = lambda p: names.get(p) or gmap.get(p) or str(p)
+    from PIL import ImageColor
+    chosen = {}                                                        # --color NAME_OR_GUID=COLOUR
+    for spec in a.color or []:
+        who, _, col = spec.partition('=')
+        try: rgb = ImageColor.getrgb(col.strip())[:3]
+        except ValueError: sys.exit(f'--color {spec}: unknown colour')
+        hits = [p for p in present if who.strip() == str(p) or who.strip().lower() == str(label_of(p)).lower()]
+        if not hits: print(f'  ! --color {spec}: no such participant in {label}', file=sys.stderr)
+        for p in hits: chosen[p] = rgb
+    near = lambda c1, c2: sum((x - y) ** 2 for x, y in zip(c1, c2)) < 90 ** 2
+    taken = list(chosen.values()) + [(230, 40, 40)]                   # pirate red stays unique
+    free = [c for c in OWNER_COLORS if not any(near(c, x) for x in taken)] or OWNER_COLORS
     palette = {}                                                       # same name, same colour
-    for p in others: color[p] = palette.setdefault(label_of(p), OWNER_COLORS[len(palette) % len(OWNER_COLORS)])
+    for p in others:
+        if p not in chosen: color[p] = palette.setdefault(label_of(p), free[len(palette) % len(free)])
+    color.update(chosen)
     grey = (170, 170, 170)
     for kind, o, aid, x, z in objs:                                   # buildings: small dots
         if kind != 'building': continue
@@ -736,6 +750,8 @@ def main():
     mp.add_argument('--names', action='append', metavar='FILE', help='GUID name map(s), as for extract')
     mp.add_argument('--texts', action='append', metavar='FILE', help='texts_<lang>.xml, as for extract')
     mp.add_argument('--width', type=int, default=1600, help='output width in pixels (default 1600)')
+    mp.add_argument('--color', action='append', metavar='WHO=COLOUR',
+                   help='participant name or GUID = colour name or #rrggbb, e.g. "Dorian=yellow"; repeatable')
     a = ap.parse_args()
     {'extract': cmd_extract, 'assets': cmd_assets, 'list': cmd_list, 'guid-table': cmd_guid_table,
      'map': cmd_map}[a.cmd](a)
