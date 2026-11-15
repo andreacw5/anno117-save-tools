@@ -141,10 +141,16 @@ stores it as `factory` and `extract` computes, per area:
 - `production`: per building type, `count`, `working` (cycle in progress), mean `productivity`,
   `output_per_minute` and `input_per_minute` = amount × 60 / cycle time × productivity;
 - `output_capacity`: what the area's production buildings make per minute at 100% productivity;
+- `idle_reasons` (per building type and per area): for buildings at 0% productivity, the status
+  icons the game shows over them (`Infolayer/Icons/t1/GUID`, template `InfoLayerIcon`), such as
+  "StorageFull" (nobody collects the output), "missing goods", a paused building or, on the Nile,
+  the flood and harvest seasons;
+- `workforce_saturation`: `AreaWorkforceManager/DeltaStorage`, per workforce type the share of
+  demand that is met (1.0 = every building has its workers);
 - `goods_per_minute`: production minus factory consumption. Residents' consumption and trade
   routes are **not** included.
 
-The save does not store why a building is idle (no `PausedReasons` set).
+`PausedReasons` is not set on idle buildings; the reason is in the status icons, see `idle_reasons`.
 
 ### Warehouse (`StrgLrg`)
 
@@ -216,7 +222,7 @@ what small supply islands are for.
 - **Renamed cities.** Default city and ship names resolve through `texts_<lang>.xml`; typed city names are inferred (see above).
   Trade route names (`RouteName`), however, are plain UTF-16 text and contain the first three
   letters of each city (for example `Hemp Kan - Mem`).
-- **Why buildings are idle**, residents' consumption per minute, load/unload direction on trade routes.
+- Residents' consumption per minute, load/unload direction on trade routes.
 
 ## 8. Known limits of `extract`
 

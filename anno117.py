@@ -380,7 +380,8 @@ def economy(objs, name, info):
     amount x 60 / cycle time x current productivity (Factory7/CurrentProductivity, 1.0 = 100%)."""
     buildings, residents = collections.Counter(), collections.Counter()
     fac = collections.defaultdict(lambda: {'count': 0, 'working': 0, 'prod': 0.0, 'out': collections.Counter(),
-                                           'in': collections.Counter(), 'cap': collections.Counter()})
+                                           'in': collections.Counter(), 'cap': collections.Counter(),
+                                           'idle': collections.Counter()})
     for ob in objs:
         gn = one(ob, 'guid')
         if one(ob, 'Building') is None or gn is None: continue
@@ -393,6 +394,10 @@ def economy(objs, name, info):
         prod = f32(one(f, 'CurrentProductivity')) or 0.0
         ps = one(f, 'ProductionState')
         x = fac[g]; x['count'] += 1; x['prod'] += prod
+        if not prod:                        # the status icons the game shows over an idle building
+            icons = sorted(name(u(i.value)) for t in ch(one(one(ob, 'Infolayer'), 'Icons'), 't1')
+                           for i in [one(t, 'GUID')] if i is not None and i.value)
+            x['idle'][' + '.join(icons) or '(no icon)'] += 1
         if ps is not None and one(ps, 'InProgress') is not None: x['working'] += 1
         spec = (info.get(g) or {}).get('factory') or {}
         try: cyc = float(spec.get('cycle') or 0)
@@ -409,18 +414,21 @@ def economy(objs, name, info):
         res['population'] = round(sum(residents.values()))
         res['residents'] = {name(g): round(n) for g, n in residents.most_common()}
     if fac:
-        rows, net, cap = [], collections.Counter(), collections.Counter()
+        rows, net, cap, idle = [], collections.Counter(), collections.Counter(), collections.Counter()
         for g, x in sorted(fac.items(), key=lambda kv: -kv[1]['count']):
             row = {'building': name(g), 'guid': g, 'count': x['count'], 'working': x['working'],
                    'productivity': round(x['prod'] / x['count'], 2)}
             if x['out']: row['output_per_minute'] = {name(k): round(v, 2) for k, v in x['out'].items()}
             if x['in']: row['input_per_minute'] = {name(k): round(v, 2) for k, v in x['in'].items()}
             if x['cap']: row['capacity_per_minute'] = {name(k): round(v, 2) for k, v in x['cap'].items()}
+            if x['idle']: row['idle_reasons'] = dict(x['idle'].most_common())
             rows.append(row)
+            idle.update(x['idle'])
             cap.update(x['cap'])
             net.update(x['out']); net.subtract(x['in'])
         res['production'] = rows
         res['output_capacity'] = {name(k): round(v, 2) for k, v in cap.most_common()}
+        if idle: res['idle_reasons'] = dict(idle.most_common())
         res['goods_per_minute'] = {name(k): round(v, 2) for k, v in sorted(net.items(), key=lambda kv: -kv[1]) if abs(v) > 0.005}
     return res
 
@@ -456,6 +464,12 @@ def areas(sroot, names, gmap, texts, ainfo=None):
             pm = one(am, 'AreaPopulationManager')
             st = one(pm, 'CurrentCityStatusGUID') if pm is not None else None
             if st is not None and st.value: e['city_status'] = name(u(st.value))
+            wm = one(one(am, 'AreaWorkforceManager'), 'DeltaStorage')
+            if wm is not None:              # share of each workforce type's demand that is met
+                wf = {name(u(k.value)): round(f32(one(v, 'Saturation')), 2)
+                      for k, v in zip(wm.children[0::2], wm.children[1::2])
+                      if k.value and f32(one(v, 'Saturation')) is not None}
+                if wf: e['workforce_saturation'] = wf
             objs = area_objects(am)
             ps = [p for p in (unpack(one(ob, 'Position'), '<fff') for ob in objs) if p]
             e.update(economy(objs, name, ainfo or {}))
@@ -600,7 +614,7 @@ RE_ASSETS = re.compile(r'(^|/)assets[^/]*\.xml$', re.I)
 RE_PROPS = re.compile(r'(^|/)export/properties\.xml$', re.I)   # default values of components
 RE_USEFUL = re.compile(r'ship|module|unit|soldier|troop|military|legion|warship|pirate|participant|'
                        r'session|weapon|siege|onager|fleet|army|naval|galley|boat|fertility|deposit|'
-                       r'citystatus', re.I)
+                       r'citystatus|infolayericon|workforce', re.I)
 
 def find_rda(path):
     if os.path.isfile(path):

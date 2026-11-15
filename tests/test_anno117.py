@@ -532,5 +532,27 @@ class TestRouteFlows(unittest.TestCase):
         self.assertEqual(results[0]['trade_routes'][0]['stations'][0]['city'], 'Portus')
 
 
+class TestEconomyStatus(unittest.TestCase):
+    def node(self, name, value=None, kids=()):
+        n = A.Node(name, value); n.children = list(kids); return n
+
+    def test_idle_reasons_from_status_icons(self):
+        f32 = lambda v: struct.pack('<f', v)
+        def building(prod, icons=()):
+            return self.node('t1', None, [
+                self.node('guid', struct.pack('<I', 500)), self.node('Building'),
+                self.node('Factory7', None, [self.node('CurrentProductivity', f32(prod))]),
+                self.node('Infolayer', None, [self.node('Icons', None, [
+                    self.node('t1', None, [self.node('GUID', struct.pack('<I', i))]) for i in icons])])])
+        objs = [building(1.0), building(0.0, [7]), building(0.0, [7]), building(0.0)]
+        names = {500: 'Sheep farm', 7: 'StorageFull'}
+        info = {500: {'factory': {'out': {'9': 1}, 'cycle': '60'}}}
+        res = A.economy(objs, lambda g: names.get(g, str(g)), info)
+        row = res['production'][0]
+        self.assertEqual(row['idle_reasons'], {'StorageFull': 2, '(no icon)': 1})
+        self.assertEqual(res['idle_reasons'], {'StorageFull': 2, '(no icon)': 1})
+        self.assertEqual(res['output_capacity'], {'9': 4.0})   # every farm at 100%
+
+
 if __name__ == '__main__':
     unittest.main()
