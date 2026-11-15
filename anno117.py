@@ -3,9 +3,10 @@
 anno117.py - read Anno 117: Pax Romana save games and game data. Python 3.8+, no dependencies.
 
 Commands:
-  extract <save.a8s> [-o DIR] [--names FILE ...]
+  extract <save.a8s> [-o DIR] [--names FILE ...] [--texts FILE ...]
         One JSON file per session (province): ships with modules and positions, land units
-        and pirate factions, grouped by owner (participant).
+        and pirate factions, grouped by owner (participant), plus every area (island) with its
+        owner, fertilities, income, city status, trade routes and city name.
   assets <path> [-o FILE] [--lang LANG] [--all]
         Find assets*.xml and texts_<LANG>.xml inside the game's .rda archives (or in a folder
         of already-extracted .xml files) and write a GUID -> name map (default guid_names.json).
@@ -109,12 +110,6 @@ def one(n, name):
         if c.name == name: return c
 def u(v): return int.from_bytes(v, 'little')
 
-def ch(n, name): return [c for c in n.children if c.name == name]
-def one(n, name):
-    for c in n.children:
-        if c.name == name: return c
-def u(v): return int.from_bytes(v, 'little')
-
 # ---------------- save extraction ----------------
 # Session GUIDs observed so far (used when no name map is available).
 KNOWN_SESSIONS = {3245: 'latium', 6627: 'albion', 149679: 'nile'}
@@ -206,23 +201,124 @@ def session(sroot, owners, names, gmap, radius):
         })
     return {'participants': parts, 'pirates': pirates}
 
+def user_texts(data_root):
+    """Texts typed by players (city, ship and army names), from MetaUserGeneratedTextManager."""
+    m = one(data_root.children[0], 'MetaUserGeneratedTextManager')
+    lst = one(m, 'UserGeneratedTexts') if m is not None else None
+    out = []
+    for v in (lst.children[1::2] if lst is not None else []):
+        t = one(v, 'DisplayText')
+        if t is not None: out.append(t.value.decode('utf-16le', 'replace').rstrip('\x00'))
+    return out
+
+RE_ROUTE_CODE = re.compile(r'\b([A-Z][a-z]{2}) - ([A-Z][a-z]{2})$')
+
+def name_cities(all_areas, utexts, humans):
+    """Trade route names end with 'Abc - Xyz', the first three letters of the two cities' names, and
+    each area records the routes that served it (routes may cross provinces). A code goes to the
+    area found in every route that uses it, by elimination, and is kept only when confirmed:
+    the area's default city name starts with it, or the area belongs to a human player and exactly
+    one player-typed text starts with it (a renamed city)."""
+    users = collections.defaultdict(list)                     # code -> [areas of each route]
+    by_route = collections.defaultdict(set)
+    for e in all_areas:
+        for r in e.get('trade_routes', {}): by_route[r].add(id(e))
+    for r, ids in by_route.items():
+        m = RE_ROUTE_CODE.search(r)
+        if m:
+            for code in set(m.groups()): users[code].append(ids)
+    cand = {c: set.intersection(*v) for c, v in users.items()}
+    byid = {id(e): e for e in all_areas}
+    defaults = {e['city'][:3] for e in all_areas if e.get('city')}
+    assigned = {}
+    for _ in range(len(cand) + 1):
+        for c, s in cand.items():
+            if c in assigned: continue
+            s = s - set(assigned.values())
+            own = [i for i in s if (byid[i].get('city') or '').startswith(c)]
+            if len(own) == 1 or len(s) == 1: assigned[c] = (own or list(s))[0]
+    for c, i in assigned.items():
+        e = byid[i]
+        if (e.get('city') or '').startswith(c):
+            e['route_code'] = c
+        elif e['owner'] in humans and c not in defaults:
+            hits = sorted({t for t in utexts if t.startswith(c)})
+            if hits:
+                e['route_code'] = c
+                if len(hits) == 1: e['custom_name'] = hits[0]
+                else: e['custom_name_candidates'] = hits
+
+def areas(sroot, names, gmap, texts):
+    """One entry per area (island or Nile district): owner, default city name, fertilities and
+    deposits, income, status, extent of its buildings, trade routes and the city's route code."""
+    gsm = one(sroot, 'GameSessionManager')
+    info, managers = one(gsm, 'AreaInfo'), one(gsm, 'AreaManagers')
+    if info is None: return []
+    name = lambda g: gmap.get(g, f'GUID {g}')
+    out = []
+    for k, v in zip(info.children[0::2], info.children[1::2]):
+        aid = u(k.value)
+        o, cn, fert = one(v, 'OwnerProfile'), one(v, 'CityNameGuid'), one(v, 'Fertility')
+        owner = u(o.value) if o is not None else None
+        rs = collections.Counter()
+        def walk(n):
+            for c in n.children:
+                if c.name == 'RouteName': rs[c.value.decode('utf-16le', 'replace').split('\x00')[0]] += 1
+                walk(c)
+        walk(one(v, 'PassiveTrade') or Node('x'))
+        e = {'area': aid, 'owner': owner,
+             'owner_name': names.get(owner) or (gmap.get(owner) if owner is not None else None),
+             'city': texts.get(struct.unpack('<q', cn.value)[0]) if cn is not None and len(cn.value) == 8 else None,
+             'fertilities': [name(u(c.value)) for c in fert.children] if fert is not None else [],
+             'fertility_guids': [u(c.value) for c in fert.children] if fert is not None else []}
+        am = one(managers, f'AreaManager_{aid}') if managers is not None else None
+        if am is not None:
+            mm = one(am, 'AreaMoneyManager')
+            inc = one(mm, 'TotalMoneyIncomePerMinute') if mm is not None else None
+            if inc is not None: e['income_per_minute'] = round(struct.unpack('<f', inc.value)[0])
+            pm = one(am, 'AreaPopulationManager')
+            st = one(pm, 'CurrentCityStatusGUID') if pm is not None else None
+            if st is not None: e['city_status'] = name(u(st.value))
+            aom = one(am, 'AreaObjectManager'); go = one(aom, 'GameObject') if aom is not None else None
+            objs = one(go, 'objects') if go is not None else None
+            ps = [struct.unpack('<fff', one(ob, 'Position').value) for ob in (objs.children if objs else [])
+                  if one(ob, 'Position') is not None]
+            if ps:
+                xs, zs = [p[0] for p in ps], [p[2] for p in ps]
+                e['objects'] = len(ps)
+                e['center'] = [round(sum(xs) / len(xs)), round(sum(zs) / len(zs))]
+                e['extent'] = [round(min(xs)), round(min(zs)), round(max(xs)), round(max(zs))]
+        if rs: e['trade_routes'] = dict(rs.most_common())
+        out.append(e)
+    return out
+
 def cmd_extract(a):
     os.makedirs(a.output, exist_ok=True)
     gmap = load_names(a.names if a.names else ['guid_names.json'] if os.path.exists('guid_names.json') else [])
     files = rda_files(a.save)
     data_root = filedb(zlib.decompress(files['data.a7s']))
     owners, names = meta_map(data_root)
+    utexts = user_texts(data_root)
+    texts = read_texts(a.texts) if a.texts else {}   # resolves the areas' default city names
+    results = []
     for s in one(data_root.children[0], 'GameSessions').children:
         sd, desc = one(s, 'SessionData'), one(s, 'SessionDesc')
         if sd is None: continue
         sg = u(one(desc, 'SessionGUID').value)
         label = KNOWN_SESSIONS.get(sg) or re.sub(r'\W+', '_', gmap.get(sg, f'session_{sg}')).lower()
-        res = {'session': label, 'session_guid': sg, 'save': os.path.basename(a.save),
-               **session(filedb(one(sd, 'BinaryData').value), owners, names, gmap, a.radius)}
+        sroot = filedb(one(sd, 'BinaryData').value)
+        results.append({'session': label, 'session_guid': sg, 'save': os.path.basename(a.save),
+                        **session(sroot, owners, names, gmap, a.radius),
+                        'areas': areas(sroot, names, gmap, texts)})
+    # trade routes cross provinces, so cities are matched to route codes over the whole save
+    name_cities([e for r in results for e in r['areas']], utexts, {p for p, n in names.items() if n})
+    for res in results:
+        label = res['session']
         p = os.path.join(a.output, label + '.json')
         json.dump(res, open(p, 'w', encoding='utf-8'), ensure_ascii=False, indent=2)
         print(f'{label}: {sum(x["ship_count"] for x in res["participants"])} ships, '
-              f'{len(res["participants"])} owners, {len(res["pirates"])} pirate factions -> {p}')
+              f'{len(res["participants"])} owners, {len(res["pirates"])} pirate factions, '
+              f'{len(res["areas"])} areas -> {p}')
 
 # ---------------- game data (assets) ----------------
 # assets.xml = <Asset><Template/><Values><Standard><GUID/><Name/>...</Standard><Text><OasisId/></Text>...
@@ -230,7 +326,8 @@ def cmd_extract(a):
 # Anno 1800 (same engine): <Text><GUID/><Text/></Text>. Files are matched by name, wherever they are.
 RE_ASSETS = re.compile(r'(^|/)assets[^/]*\.xml$', re.I)
 RE_USEFUL = re.compile(r'ship|module|unit|soldier|troop|military|legion|warship|pirate|participant|'
-                       r'session|weapon|siege|onager|fleet|army|naval|galley|boat', re.I)
+                       r'session|weapon|siege|onager|fleet|army|naval|galley|boat|fertility|deposit|'
+                       r'citystatus', re.I)
 
 def find_rda(path):
     if os.path.isfile(path):
@@ -285,7 +382,8 @@ def read_assets(files):
                 g = txt(std, 'GUID')
                 if g and g.isdigit():
                     a = {'name': txt(std, 'Name'), 'template': txt(el, 'Template'), 'base': txt(el, 'BaseAssetGUID'),
-                         'text_id': txt(el, 'Values/Text/OasisId')}   # Anno 117: id of the name in texts_*.xml
+                         # Anno 117: id of the name in texts_*.xml (city statuses have a more specific one)
+                         'text_id': txt(el, 'Values/CityStatus/CityStatusName') or txt(el, 'Values/Text/OasisId')}
                     assets[int(g)] = {k: v for k, v in a.items() if v}
                 el.clear()
         except ET.ParseError as e:
@@ -367,6 +465,8 @@ def main():
     e.add_argument('--names', action='append', metavar='FILE',
                    help='GUID name map; repeatable, later files win (default: ./guid_names.json if present)')
     e.add_argument('--radius', type=float, default=40, help='squadron clustering radius (default 40)')
+    e.add_argument('--texts', action='append', metavar='FILE',
+                   help='texts_<lang>.xml (as extracted by `assets`) to name the areas\' default cities')
     s = sub.add_parser('assets', help='game files -> GUID name map')
     s.add_argument('path', help='Anno 117 "maindata" folder, a single .rda (config.rda is enough), or a folder of extracted .xml')
     s.add_argument('-o', '--output', default='guid_names.json')

@@ -100,16 +100,49 @@ In the saves we analysed, participant **41** was the human player. AI factions a
 other GUIDs (31099, 31100, 153067…). The pirate faction's participant GUID equals the `guid` of its
 `Pirate` object (for example 153069 for the Kashta in the Nile).
 
-## 5. What cannot be read from the save alone
+## 5. Islands (areas)
+
+Each island, or district (*nome*) on the Nile, is an **area**. Two places describe it:
+
+- `GameSessionManager/AreaInfo`: a list of pairs, the area id (`uint16`) then its data:
+
+  | Field | Meaning |
+  |---|---|
+  | `OwnerProfile` | participant GUID of the owner (missing if nobody owns it) |
+  | `Fertility` | GUIDs of the island's fertilities and deposits (template `Fertility`) |
+  | `CityNameGuid` | `int64` text id: the `LineId` of the default city name in `texts_<lang>.xml` |
+  | `PassiveTrade/History/TradeRouteEntries/…/RouteName` | UTF-16 names of the trade routes that served the area |
+  | `AreaEconomy/StrgLrg` | warehouse content (not decoded yet) |
+
+- `GameSessionManager/AreaManagers/AreaManager_<area id>`: the area's simulation.
+  `AreaMoneyManager/TotalMoneyIncomePerMinute` is a `float32` balance;
+  `AreaPopulationManager/CurrentCityStatusGUID` is the city status (template `CityStatus`, whose
+  name is under `Values/CityStatus/CityStatusName`); the area's buildings are in
+  `AreaObjectManager/GameObject/objects`, and their positions give the island's extent.
+
+### City names
+
+A renamed city keeps its default `CityNameGuid`. The typed name is stored, with ship and army
+names, in `MetaGameManager/MetaUserGeneratedTextManager/UserGeneratedTexts` (pairs of an `int64` id
+and `RawText`/`SanitizedText`/`DisplayText`), but we found no reference from the area to that id.
+
+`extract` therefore infers it from the trade routes. Route names end with `Abc - Xyz`, the first
+three letters of both cities, and routes may cross provinces. A code goes to the area that appears
+in every route using it, by elimination. It is kept only when confirmed: either the default city
+name starts with it, or the area belongs to a player with a custom company name and exactly one
+typed text starts with it (`custom_name`; several matches give `custom_name_candidates`). Treat it
+as a guess.
+
+## 6. What cannot be read from the save alone
 
 - **Type names.** Saves contain only numeric GUIDs. Names live in the game data:
   see [Game data and GUID names](game-data.md).
-- **Ship and city names.** They are text references (`VehicleTextGuid`, `CityNameGuid`).
+- **Ship and city names.** They are text references (`VehicleTextGuid`, `CityNameGuid`): see above for city names.
   Trade route names (`RouteName`), however, are plain UTF-16 text and contain the first three
   letters of each city (for example `Hemp Kan - Mem`).
-- **Buildings and goods.** The data is under `AreaManagers` and `AreaInfo` but is not mapped yet.
+- **Buildings and goods.** Building positions are read (to size islands); warehouse contents are not decoded yet.
 
-## 6. Known limits of `extract`
+## 7. Known limits of `extract`
 
 - Squadrons are a greedy distance clustering (`--radius`), not the game's own fleet groups.
 - Objects whose `MetaID` is not in the `MetaObjectMap` are reported under an `unknown owner`.
