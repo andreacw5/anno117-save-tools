@@ -121,6 +121,30 @@ Each island, or district (*nome*) on the Nile, is an **area**. Two places descri
   name is under `Values/CityStatus/CityStatusName`); the area's buildings are in
   `AreaObjectManager/GameObject/objects`, and their positions give the island's extent.
 
+### Buildings, residents and production
+
+Every object of an area with a `Building` component is counted by type (`buildings`). Two
+components carry the economy:
+
+| Component | Field | Meaning |
+|---|---|---|
+| `Residence7` | `ResidentCount` (`float32`) | residents of the house; `AverageNeedSaturation`, `ConsumptionStates` per good |
+| `Factory7` | `CurrentProductivity` (`float32`, 1.0 = 100%) | 0 when the building is idle |
+| `Factory7` | `ProductionState/InProgress`, `RemainingTime` | a cycle is running |
+
+What a building makes comes from the game data: `Values/FactoryBase` in `assets.xml`
+(`FactoryInputs`/`FactoryOutputs` items with `Product` and `Amount`, and `CycleTime` in seconds;
+when missing, the default is `FactoryBase/CycleTime` in `export/properties.xml`, 30 s). `assets`
+stores it as `factory` and `extract` computes, per area:
+
+- `population` and `residents` (by house type);
+- `production`: per building type, `count`, `working` (cycle in progress), mean `productivity`,
+  `output_per_minute` and `input_per_minute` = amount × 60 / cycle time × productivity;
+- `goods_per_minute`: production minus factory consumption. Residents' consumption and trade
+  routes are **not** included.
+
+The save does not store why a building is idle (no `PausedReasons` set).
+
 ### Warehouse (`StrgLrg`)
 
 A flat list of `uint32`: N good GUIDs, then N amounts. The first GUID is absolute; each next one
@@ -149,7 +173,7 @@ as a guess.
 - **Ship and city names.** They are text references (`VehicleTextGuid`, `CityNameGuid`): see above for city names.
   Trade route names (`RouteName`), however, are plain UTF-16 text and contain the first three
   letters of each city (for example `Hemp Kan - Mem`).
-- **Buildings.** Positions are read (to size islands); building types are not summarised yet.
+- **Why buildings are idle**, and residents' consumption per minute.
 
 ## 7. Known limits of `extract`
 

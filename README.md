@@ -5,7 +5,8 @@ No dependencies, Python 3.8 or newer.
 
 - **`extract`**: turn a save into one JSON file per province, listing every participant's ships
   (type, installed modules, map position, squadrons) and land units, pirate factions, and every
-  island (owner, fertilities and deposits, warehouse stock, income, city status, trade routes).
+  island (owner, fertilities and deposits, warehouse stock, buildings, population, production per
+  minute, income, city status, trade routes).
 - **`assets`**: pull the official GUID → name map out of your own copy of the game.
 - **`map`**: draw a province as a PNG, from the save's map template and the game's own map tiles,
   with islands, buildings, ships and units coloured by owner and pirate structures marked.
@@ -63,7 +64,7 @@ Output (`sessions/<province>.json`, abridged):
 | Command | What it does |
 |---|---|
 | `extract <save> [-o DIR] [--names FILE]… [--texts FILE]… [--radius R]` | One JSON per session. `--texts` takes a `texts_<lang>.xml` (as extracted by `assets`) to name the islands' default cities. `--names` can be repeated to layer maps (e.g. your own hand-written guesses, then the official `guid_names.json`): later files win. `--radius` sets the distance used to group ships into squadrons (default 40). |
-| `assets <path> [-o FILE] [--lang LANG] [--all] [--extract-dir DIR]` | Finds `assets*.xml` and `texts_<LANG>.xml` in the `.rda` archives (or in a folder of extracted `.xml`) and writes `guid_names.json`. Without `--all` it keeps only naval, military, participant, session, fertility and city status assets. |
+| `assets <path> [-o FILE] [--lang LANG] [--all] [--extract-dir DIR]` | Finds `assets*.xml` and `texts_<LANG>.xml` in the `.rda` archives (or in a folder of extracted `.xml`) and writes `guid_names.json`. Without `--all` it keeps only naval, military, participant, session, fertility, city status and production assets. Production buildings also get `factory` (inputs, outputs, cycle time), read from `assets.xml` and `properties.xml`. |
 | `map <save> <maindata> [--session S] [-o FILE] [--names FILE]… [--texts FILE]… [--width W]` | PNG map of one province (default `nile`). Needs **Pillow** (`pip install pillow`), the only command with a dependency. |
 | `list <file.rda or dir> [FILTER]` | Lists archive contents, optionally filtered by substring. |
 | `guid-table <guid_names.json> [-o FILE]` | Writes a Markdown table (default `docs/guids.md`). |
@@ -79,7 +80,7 @@ Output (`sessions/<province>.json`, abridged):
 | Warehouse stock per island | ✅ tested on real saves |
 | City names | ⚠️ default names exact; renamed cities **inferred** from trade route codes |
 | Province maps (`map`) | ✅ tested on three provinces; tile seams are visible |
-| Building types and production | ❌ not mapped yet (only positions are read) |
+| Buildings, population, production per minute | ✅ tested on real saves; residents' consumption not included |
 
 Reports and pull requests are welcome, especially output of `list` on your game's `maindata` folder.
 

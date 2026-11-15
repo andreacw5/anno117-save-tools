@@ -6,7 +6,8 @@ Commands:
   extract <save.a8s> [-o DIR] [--names FILE ...] [--texts FILE ...]
         One JSON file per session (province): ships with modules and positions, land units
         and pirate factions, grouped by owner (participant), plus every area (island) with its
-        owner, fertilities, income, city status, trade routes and city name.
+        owner, fertilities, warehouse, buildings, population, production per minute, income,
+        city status, trade routes and city name.
   assets <path> [-o FILE] [--lang LANG] [--all]
         Find assets*.xml and texts_<LANG>.xml inside the game's .rda archives (or in a folder
         of already-extracted .xml files) and write a GUID -> name map (default guid_names.json).
@@ -263,7 +264,60 @@ def storage(b):
         keys.append(g)
     return dict(zip(keys, w[n:]))
 
-def areas(sroot, names, gmap, texts):
+def load_info(paths):
+    """GUID -> asset record (template, factory...) from maps written by `assets`."""
+    m = {}
+    for path in paths:
+        if os.path.exists(path):
+            for k, v in json.load(open(path, encoding='utf-8')).items():
+                if k.isdigit() and isinstance(v, dict): m[int(k)] = v
+    return m
+
+def f32(n):
+    return struct.unpack('<f', n.value)[0] if n is not None and n.value is not None and len(n.value) == 4 else None
+
+def economy(objs, name, info):
+    """Buildings, residents and production of one area's objects. Production per minute is
+    amount x 60 / cycle time x current productivity (Factory7/CurrentProductivity, 1.0 = 100%)."""
+    buildings, residents = collections.Counter(), collections.Counter()
+    fac = collections.defaultdict(lambda: {'count': 0, 'working': 0, 'prod': 0.0, 'out': collections.Counter(),
+                                           'in': collections.Counter()})
+    for ob in objs:
+        if one(ob, 'Building') is None: continue
+        g = u(one(ob, 'guid').value)
+        buildings[g] += 1
+        r = one(ob, 'Residence7')
+        if r is not None: residents[g] += f32(one(r, 'ResidentCount')) or 0
+        f = one(ob, 'Factory7')
+        if f is None: continue
+        prod = f32(one(f, 'CurrentProductivity')) or 0.0
+        ps = one(f, 'ProductionState')
+        x = fac[g]; x['count'] += 1; x['prod'] += prod
+        if ps is not None and one(ps, 'InProgress') is not None: x['working'] += 1
+        spec = (info.get(g) or {}).get('factory') or {}
+        cyc = float(spec.get('cycle') or 0)
+        if cyc:
+            for k, d in (('out', 'out'), ('in', 'in')):
+                for good, amt in spec.get(k, {}).items(): x[d][int(good)] += amt * 60 / cyc * prod
+    res = {}
+    if buildings: res['buildings'] = {name(g): n for g, n in buildings.most_common()}
+    if residents:
+        res['population'] = round(sum(residents.values()))
+        res['residents'] = {name(g): round(n) for g, n in residents.most_common()}
+    if fac:
+        rows, net = [], collections.Counter()
+        for g, x in sorted(fac.items(), key=lambda kv: -kv[1]['count']):
+            row = {'building': name(g), 'guid': g, 'count': x['count'], 'working': x['working'],
+                   'productivity': round(x['prod'] / x['count'], 2)}
+            if x['out']: row['output_per_minute'] = {name(k): round(v, 2) for k, v in x['out'].items()}
+            if x['in']: row['input_per_minute'] = {name(k): round(v, 2) for k, v in x['in'].items()}
+            rows.append(row)
+            net.update(x['out']); net.subtract(x['in'])
+        res['production'] = rows
+        res['goods_per_minute'] = {name(k): round(v, 2) for k, v in sorted(net.items(), key=lambda kv: -kv[1]) if abs(v) > 0.005}
+    return res
+
+def areas(sroot, names, gmap, texts, ainfo=None):
     """One entry per area (island or Nile district): owner, default city name, fertilities and
     deposits, income, status, extent of its buildings, trade routes and the city's route code."""
     gsm = one(sroot, 'GameSessionManager')
@@ -298,6 +352,7 @@ def areas(sroot, names, gmap, texts):
             objs = one(go, 'objects') if go is not None else None
             ps = [struct.unpack('<fff', one(ob, 'Position').value) for ob in (objs.children if objs else [])
                   if one(ob, 'Position') is not None]
+            e.update(economy(objs.children if objs else [], name, ainfo or {}))
             if ps:
                 xs, zs = [p[0] for p in ps], [p[2] for p in ps]
                 e['objects'] = len(ps)
@@ -315,7 +370,8 @@ def areas(sroot, names, gmap, texts):
 
 def cmd_extract(a):
     os.makedirs(a.output, exist_ok=True)
-    gmap = load_names(a.names if a.names else ['guid_names.json'] if os.path.exists('guid_names.json') else [])
+    paths = a.names if a.names else ['guid_names.json'] if os.path.exists('guid_names.json') else []
+    gmap, info = load_names(paths), load_info(paths)
     files = rda_files(a.save)
     data_root = filedb(zlib.decompress(files['data.a7s']))
     owners, names = meta_map(data_root)
@@ -330,7 +386,7 @@ def cmd_extract(a):
         sroot = filedb(one(sd, 'BinaryData').value)
         results.append({'session': label, 'session_guid': sg, 'save': os.path.basename(a.save),
                         **session(sroot, owners, names, gmap, a.radius),
-                        'areas': areas(sroot, names, gmap, texts)})
+                        'areas': areas(sroot, names, gmap, texts, info)})
     # trade routes cross provinces, so cities are matched to route codes over the whole save
     name_cities([e for r in results for e in r['areas']], utexts, {p for p, n in names.items() if n})
     for res in results:
@@ -346,6 +402,7 @@ def cmd_extract(a):
 # Anno 117: texts_<language>.xml = <Text><LineId/><Text/></Text>, where LineId = the asset's OasisId.
 # Anno 1800 (same engine): <Text><GUID/><Text/></Text>. Files are matched by name, wherever they are.
 RE_ASSETS = re.compile(r'(^|/)assets[^/]*\.xml$', re.I)
+RE_PROPS = re.compile(r'(^|/)export/properties\.xml$', re.I)   # default values of components
 RE_USEFUL = re.compile(r'ship|module|unit|soldier|troop|military|legion|warship|pirate|participant|'
                        r'session|weapon|siege|onager|fleet|army|naval|galley|boat|fertility|deposit|'
                        r'citystatus', re.I)
@@ -357,10 +414,11 @@ def find_rda(path):
 
 def collect_xml(path, dest, lang):
     re_texts = re.compile(r'(^|/)texts?_%s[^/]*\.xml$' % re.escape(lang), re.I)
-    found = {'assets': [], 'texts': []}
+    found = {'assets': [], 'texts': [], 'props': []}
     def kind(n):
         n = n.replace('\\', '/')
-        return 'assets' if RE_ASSETS.search(n) else 'texts' if re_texts.search(n) else None
+        return ('assets' if RE_ASSETS.search(n) else 'texts' if re_texts.search(n)
+                else 'props' if RE_PROPS.search(n) else None)
     if os.path.isdir(path):   # already-extracted .xml files (e.g. with RDAExplorer)
         for r, _, fs in os.walk(path):
             for f in fs:
@@ -405,6 +463,12 @@ def read_assets(files):
                     a = {'name': txt(std, 'Name'), 'template': txt(el, 'Template'), 'base': txt(el, 'BaseAssetGUID'),
                          # Anno 117: id of the name in texts_*.xml (city statuses have a more specific one)
                          'text_id': txt(el, 'Values/CityStatus/CityStatusName') or txt(el, 'Values/Text/OasisId')}
+                    fb = el.find('Values/FactoryBase')
+                    if fb is not None:   # production: goods per cycle, cycle time in seconds
+                        io_ = lambda tag: {txt(i, 'Product'): int(txt(i, 'Amount') or 1)
+                                           for i in fb.findall(tag + '/Item') if txt(i, 'Product')}
+                        fac = {'in': io_('FactoryInputs'), 'out': io_('FactoryOutputs'), 'cycle': txt(fb, 'CycleTime')}
+                        a['factory'] = {k: v for k, v in fac.items() if v}
                     assets[int(g)] = {k: v for k, v in a.items() if v}
                 el.clear()
         except ET.ParseError as e:
@@ -435,6 +499,10 @@ def cmd_assets(a):
     if not xml['texts']:
         print(f'  ! no texts_{a.lang}*.xml found: only internal names will be available', file=sys.stderr)
     assets, texts = read_assets(xml['assets']), read_texts(xml['texts'])
+    default_cycle = None                 # FactoryBase/CycleTime when an asset does not set it
+    for f in xml['props']:
+        m = re.search(r'<FactoryBase>.*?<CycleTime>(\d+)</CycleTime>', open(f, encoding='utf-8', errors='replace').read(), re.S)
+        if m: default_cycle = m.group(1)
 
     def inherited(g, key, depth=0):   # assets with a BaseAssetGUID inherit missing values from the base
         x = assets.get(g, {})
@@ -448,7 +516,10 @@ def cmd_assets(a):
         local = texts.get(int(tid)) if tid and tid.lstrip('-').isdigit() else texts.get(g)
         if local: x['name_local'] = local
         if inherited(g, 'template'): x['template'] = inherited(g, 'template')
-        if a.all or RE_USEFUL.search(x.get('template') or '') or RE_USEFUL.search(x.get('name') or ''):
+        if inherited(g, 'factory'):
+            x['factory'] = dict(inherited(g, 'factory'))
+            if 'cycle' not in x['factory'] and default_cycle: x['factory']['cycle'] = default_cycle
+        if a.all or 'factory' in x or RE_USEFUL.search(x.get('template') or '') or RE_USEFUL.search(x.get('name') or ''):
             out[str(g)] = x
     out = dict(sorted(out.items(), key=lambda kv: int(kv[0])))
     json.dump(out, open(a.output, 'w', encoding='utf-8'), ensure_ascii=False, indent=1)
@@ -548,7 +619,8 @@ def cmd_map(a):
         from PIL import Image, ImageDraw, ImageFont
     except ImportError:
         sys.exit('The map command needs Pillow: pip install pillow')
-    gmap = load_names(a.names if a.names else ['guid_names.json'] if os.path.exists('guid_names.json') else [])
+    paths = a.names if a.names else ['guid_names.json'] if os.path.exists('guid_names.json') else []
+    gmap, info = load_names(paths), load_info(paths)
     files = rda_files(a.save)
     data_root = filedb(zlib.decompress(files['data.a7s']))
     owners, names = meta_map(data_root)
@@ -560,7 +632,7 @@ def cmd_map(a):
         sg = u(one(desc, 'SessionGUID').value)
         label = KNOWN_SESSIONS.get(sg) or re.sub(r'\W+', '_', gmap.get(sg, f'session_{sg}')).lower()
         root = filedb(one(sd, 'BinaryData').value)
-        sessions.append((label, sg, root, areas(root, names, gmap, texts)))
+        sessions.append((label, sg, root, areas(root, names, gmap, texts, info)))
     name_cities([e for s in sessions for e in s[3]], user_texts(data_root), {p for p, n in names.items() if n})
     pick = [s for s in sessions if a.session in (s[0], str(s[1]))]
     if not pick: sys.exit('Unknown session; available: ' + ', '.join(f'{s[0]} ({s[1]})' for s in sessions))
