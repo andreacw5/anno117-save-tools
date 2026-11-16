@@ -1154,17 +1154,28 @@ display:flex;flex-wrap:wrap;gap:6px 10px;align-items:center}
 .bar .title{font-weight:700}.bar .save{color:var(--muted);font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:40ch}
 .bar .grow{flex:1}.age{font-size:12px;color:var(--muted)}.age.stale{color:var(--medium);font-weight:600}
 button{font:inherit;font-size:12px;color:var(--text);background:var(--panel);border:1px solid var(--line);
-border-radius:999px;padding:2px 10px;cursor:pointer}button[aria-pressed=false]{opacity:.45}
-button.lvl.high{color:var(--high)}button.lvl.medium{color:var(--medium)}button.lvl.info{color:var(--info)}
-button.prov[aria-pressed=true]{border-color:var(--accent);color:var(--accent)}
+border-radius:999px;padding:2px 10px;cursor:pointer}button:hover{border-color:var(--muted)}
+button[aria-pressed=false]{background:transparent;color:var(--muted);border-style:dashed}
+button:disabled{opacity:.35;cursor:default}
+button.lvl.high[aria-pressed=true]{color:var(--high);background:var(--high-bg);border-color:var(--high)}
+button.lvl.medium[aria-pressed=true]{color:var(--medium);background:var(--medium-bg);border-color:var(--medium)}
+button.lvl.info[aria-pressed=true]{color:var(--info);background:var(--info-bg);border-color:var(--info)}
+button#onlynew[aria-pressed=true]{color:var(--new);border-color:var(--new)}
+button.prov[aria-pressed=true],.seg button[aria-pressed=true]{border-color:var(--accent);color:var(--accent)}
+.seg{display:inline-flex}.seg button{border-radius:0;border-style:solid}.seg button:first-child{border-radius:999px 0 0 999px}
+.seg button:last-child{border-radius:0 999px 999px 0;margin-left:-1px}
+:focus-visible{outline:2px solid var(--accent);outline-offset:2px}::selection{background:var(--accent);color:var(--bg)}
+html{color-scheme:dark;scrollbar-color:var(--line) var(--bg)}:root[data-theme=light]{color-scheme:light}
 h2{font-size:17px;margin:0;color:var(--accent);display:inline}.sec{margin-top:18px}
 .sec>summary{cursor:pointer;padding:6px 0;list-style-position:inside}
 h3{font-size:14px;margin:14px 0 6px}.muted{color:var(--muted)}
 .cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(min(320px,100%),1fr));gap:8px;margin-top:8px}
-.card{background:var(--panel);border:1px solid var(--line);border-left-width:4px;border-radius:6px;padding:6px 10px}
-.card[data-level=high]{border-left-color:var(--high)}.card[data-level=medium]{border-left-color:var(--medium)}
-.card[data-level=info]{border-left-color:var(--info)}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:6px 10px;scroll-margin-top:64px}
+.card[data-level=high]{border-color:var(--high);background:linear-gradient(var(--high-bg),var(--panel) 40px)}
+.card.cur{outline:2px solid var(--accent);outline-offset:1px}
 .head{display:flex;gap:8px;align-items:baseline;flex-wrap:wrap}.place{font-weight:700}
+button.place{font:inherit;font-weight:700;color:var(--text);background:none;border:0;border-radius:3px;padding:0;
+text-decoration:underline dotted;text-underline-offset:3px}button.place:hover{color:var(--accent)}
 .kind{font-size:11px;text-transform:uppercase;color:var(--muted)}.detail{font-size:12px;color:var(--muted)}
 .card ul{list-style:none;padding:0;margin:4px 0 0;display:grid;gap:4px}
 .card li{padding-left:12px;position:relative}.card li::before{content:"";position:absolute;left:0;top:.55em;
@@ -1175,12 +1186,14 @@ border-radius:4px;padding:0 4px;margin-right:4px}
 .wrap{overflow-x:auto;background:var(--panel);border:1px solid var(--line);border-radius:6px}
 table{border-collapse:collapse;width:100%;font-size:13px}th,td{padding:4px 8px;text-align:left;
 border-bottom:1px solid var(--line);white-space:nowrap}td.num,th.num{text-align:right;font-variant-numeric:tabular-nums}
-th{cursor:pointer;user-select:none;background:var(--panel)}tr:last-child td{border-bottom:0}
+th{cursor:pointer;user-select:none;background:var(--panel)}th:hover{color:var(--accent)}
+th[aria-sort=ascending]::after{content:" ▲";font-size:9px}th[aria-sort=descending]::after{content:" ▼";font-size:9px}
+tbody tr:hover td{background:var(--bg)}tr:last-child td{border-bottom:0}
 td:first-child,th:first-child{position:sticky;left:0;background:var(--panel)}
 details{margin:6px 0}summary{cursor:pointer;font-weight:600}img{max-width:100%;border-radius:6px;border:1px solid var(--line)}
 .note{font-size:12px;color:var(--muted);margin:4px 0}
 select{font:inherit;font-size:12px;color:var(--text);background:var(--panel);border:1px solid var(--line);border-radius:6px;
-padding:2px 6px;max-width:100%}.place[data-island]{cursor:pointer;text-decoration:underline dotted}
+padding:2px 6px;max-width:100%}
 .isl h2{display:block;margin:6px 0 2px}.facts{color:var(--muted);font-size:12px;margin-bottom:6px}
 .isl ul.al{list-style:none;padding:0;margin:6px 0;display:grid;gap:3px}.isl ul.al li{padding-left:12px;position:relative}
 .isl ul.al li::before{content:"";position:absolute;left:0;top:.55em;width:6px;height:6px;border-radius:50%;background:var(--info)}
@@ -1194,14 +1207,17 @@ HTML_SCRIPT = r"""
 const S={get(k,d){try{const v=localStorage.getItem('anno117:'+k);return v===null?d:JSON.parse(v)}catch(e){return d}},
 set(k,v){try{localStorage.setItem('anno117:'+k,JSON.stringify(v))}catch(e){}}};
 const R=document.documentElement,B=window.__REPORT;
-R.dataset.theme=S.get('theme','dark');
-let hidden=new Set(S.get('hidden',['info'])),prov=S.get('prov','all');
+R.dataset.theme=S.get('theme',matchMedia('(prefers-color-scheme: light)').matches?'light':'dark');
+let hidden=new Set(S.get('hidden',['info'])),prov=S.get('prov','all'),onlyNew=S.get('onlyNew',false);
 const cards=[...document.querySelectorAll('.card')],secs=[...document.querySelectorAll('.sec[data-prov]')];
+const NB=document.getElementById('onlynew');
 function apply(){
   const n={high:0,medium:0,info:0};
   cards.forEach(c=>{const ok=prov==='all'||!c.dataset.prov||c.dataset.prov.split(' ').includes(prov);let vis=0;
-    c.querySelectorAll('li').forEach(li=>{const l=li.dataset.level;if(ok)n[l]++;const v=ok&&!hidden.has(l);li.hidden=!v;vis+=v});
+    c.querySelectorAll('li').forEach(li=>{const l=li.dataset.level,isNew=!!li.querySelector('.new');
+      if(ok&&(!onlyNew||isNew))n[l]++;const v=ok&&!hidden.has(l)&&(!onlyNew||isNew);li.hidden=!v;vis+=v});
     c.hidden=!vis});
+  if(NB)NB.setAttribute('aria-pressed',onlyNew);
   secs.forEach(s=>s.hidden=!(prov==='all'||s.dataset.prov===prov));
   document.querySelectorAll('button.lvl').forEach(b=>{const l=b.dataset.level;b.setAttribute('aria-pressed',!hidden.has(l));
     b.textContent=n[l]+' '+l});
@@ -1210,6 +1226,8 @@ function apply(){
   document.title=(n.high?'('+n.high+') ':'')+'Anno 117 report';
 }
 function toggle(l){hidden.has(l)?hidden.delete(l):hidden.add(l);S.set('hidden',[...hidden]);apply()}
+function toggleNew(){if(!NB)return;onlyNew=!onlyNew;S.set('onlyNew',onlyNew);apply()}
+if(NB)NB.onclick=toggleNew;
 document.querySelectorAll('button.lvl').forEach(b=>b.onclick=()=>toggle(b.dataset.level));
 document.querySelectorAll('button.prov').forEach(b=>b.onclick=()=>{prov=b.dataset.prov;S.set('prov',prov);apply()});
 document.getElementById('theme').onclick=()=>{R.dataset.theme=R.dataset.theme==='dark'?'light':'dark';S.set('theme',R.dataset.theme)};
@@ -1218,19 +1236,28 @@ document.getElementById('maps').onclick=maps;
 if(S.get('maps',false))document.querySelectorAll('details.map').forEach(x=>x.open=true);
 document.querySelectorAll('details[id]').forEach(d=>{const k='open:'+d.id,v=S.get(k,null);if(v!==null)d.open=v;
   d.addEventListener('toggle',()=>S.set(k,d.open))});
-document.querySelectorAll('table').forEach(t=>t.querySelectorAll('th').forEach((th,i)=>th.onclick=()=>{
-  const b=t.tBodies[0],rows=[...b.rows],dir=th.dataset.dir=th.dataset.dir==='asc'?'desc':'asc';
-  const key=r=>{const c=r.cells[i];return c.dataset.v!==undefined?parseFloat(c.dataset.v):c.textContent.toLowerCase()};
-  rows.sort((x,y)=>{const a=key(x),c=key(y);return (a>c?1:a<c?-1:0)*(dir==='asc'?1:-1)});rows.forEach(r=>b.appendChild(r))}));
+document.querySelectorAll('table').forEach(t=>t.querySelectorAll('th').forEach((th,i)=>{
+  th.tabIndex=0;th.title='sort';
+  const sort=()=>{const b=t.tBodies[0],rows=[...b.rows],num=th.classList.contains('num');
+    const dir=th.getAttribute('aria-sort')==='ascending'?'descending':'ascending';
+    t.querySelectorAll('th[aria-sort]').forEach(x=>x.removeAttribute('aria-sort'));th.setAttribute('aria-sort',dir);
+    // numeric columns: blank cells always last, whatever the direction
+    const key=r=>{const c=r.cells[i];if(!num)return c.textContent.toLowerCase();const v=parseFloat(c.dataset.v);return isNaN(v)?null:v};
+    const s=dir==='ascending'?1:-1;
+    rows.sort((x,y)=>{const a=key(x),c=key(y);if(a===null||c===null)return (a===null)-(c===null);
+      return (a>c?1:a<c?-1:0)*s});rows.forEach(r=>b.appendChild(r))};
+  th.onclick=sort;th.onkeydown=e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();sort()}}}));
 function age(){const m=Math.round((Date.now()-B.generated)/60000),e=document.getElementById('age');
   e.textContent='updated '+new Date(B.generated).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'})+' · '+m+' min ago';
   e.classList.toggle('stale',m>=B.stale)}
 age();setInterval(age,30000);
-function go(d){const v=cards.filter(c=>!c.hidden);if(!v.length)return;const y=window.scrollY+70;
+function go(d){const va=document.getElementById('v-alarms');if(va&&va.hidden)return;
+  const v=cards.filter(c=>!c.hidden);if(!v.length)return;const y=window.scrollY+70;
   let i=d>0?v.findIndex(c=>c.getBoundingClientRect().top+window.scrollY>y+1):v.length-1-[...v].reverse().findIndex(c=>c.getBoundingClientRect().top+window.scrollY<y-1);
-  if(i<0||i>=v.length)i=d>0?v.length-1:0;v[i].scrollIntoView({block:'start'})}
+  if(i<0||i>=v.length)i=d>0?v.length-1:0;cards.forEach(c=>c.classList.remove('cur'));v[i].classList.add('cur');
+  v[i].scrollIntoView({block:'start'})}
 document.addEventListener('keydown',e=>{if(e.ctrlKey||e.metaKey||e.altKey||/input|select|textarea/i.test(e.target.tagName))return;
-  const k=e.key;if(k==='1')toggle('high');else if(k==='2')toggle('medium');else if(k==='3')toggle('info');
+  const k=e.key;if(k==='1')toggle('high');else if(k==='2')toggle('medium');else if(k==='3')toggle('info');else if(k==='n')toggleNew();
   else if(k==='j')go(1);else if(k==='k')go(-1);else if(k==='m')maps();else if(k==='g')scrollTo(0,0);
   else if(k==='t')document.getElementById('theme').click();else if(k==='r')location.reload()});
 try{const y=sessionStorage.getItem('anno117:y');if(y!==null){sessionStorage.removeItem('anno117:y');scrollTo(0,+y)}}catch(e){}
@@ -1239,13 +1266,16 @@ if(B.stamp){let wait=5000;const poll=()=>{const s=document.createElement('script
   s.onload=()=>{s.remove();if(window.__annoStamp&&window.__annoStamp!==B.build){
     try{sessionStorage.setItem('anno117:y',String(window.scrollY))}catch(e){}location.reload()}else setTimeout(poll,wait)};
   s.onerror=()=>{s.remove();setTimeout(poll,30000)};document.head.appendChild(s)};setTimeout(poll,wait)}
-const VI=document.getElementById('v-island'),VA=document.getElementById('v-alarms'),SEL=document.getElementById('isl'),VB=document.getElementById('view');
+const VI=document.getElementById('v-island'),VA=document.getElementById('v-alarms'),SEL=document.getElementById('isl');
 function showIsland(id){if(!SEL)return;if(id&&[...SEL.options].some(o=>o.value===id))SEL.value=id;S.set('island',SEL.value);
   document.querySelectorAll('.isl').forEach(x=>x.hidden=x.dataset.id!==SEL.value)}
-function view(v){if(!VI)return;VI.hidden=v!=='island';VA.hidden=v==='island';VB.textContent=v==='island'?'alarms':'island';
-  VB.title=v==='island'?'back to the alarms (i)':'island view (i)';S.set('view',v);scrollTo(0,0)}
+function view(v){if(!VI)return;VI.hidden=v!=='island';VA.hidden=v==='island';
+  document.querySelectorAll('.seg button').forEach(b=>b.setAttribute('aria-pressed',b.dataset.view===v));
+  // level/new/province filters act on the alarm cards only
+  document.querySelectorAll('button.lvl,button.prov,#onlynew').forEach(b=>b.disabled=v==='island');
+  S.set('view',v);scrollTo(0,0)}
 if(SEL){showIsland(S.get('island',SEL.value));SEL.onchange=()=>{showIsland(SEL.value);view('island')};
-  VB.onclick=()=>view(VI.hidden?'island':'alarms');view(S.get('view','alarms'));
+  document.querySelectorAll('.seg button').forEach(b=>b.onclick=()=>view(b.dataset.view));view(S.get('view','alarms'));
   document.querySelectorAll('.place[data-island]').forEach(p=>p.onclick=()=>{showIsland(p.dataset.island);view('island')});
   document.addEventListener('keydown',e=>{if(e.key==='i'&&!/input|select|textarea/i.test(e.target.tagName))view(VI.hidden?'island':'alarms')})}
 apply();
@@ -1276,10 +1306,13 @@ def render_html(rep, images, stamp=None):
            f'<span class="save" title="{h(rep["save"] or "")}">{h(rep["save"] or "")}</span>'
            + ''.join(f'<button class="lvl {l}" data-level="{l}" title="show/hide ({k})">{l}</button>'
                      for l, k in (('high', 1), ('medium', 2), ('info', 3)))
+           + ('<button id="onlynew" aria-pressed="false" title="only alarms new since the previous save (n)">only new</button>'
+              if rep['previous'] else '')
            + '<button class="prov" data-prov="all">all</button>'
            + ''.join(f'<button class="prov" data-prov="{h(p)}">{h(p)}</button>' for p in provs)
            + '<span class="grow"></span><span class="age" id="age"></span>'
-           + ('<button id="view" title="island view (i)">island</button><select id="isl" aria-label="island">'
+           + ('<span class="seg" role="group" aria-label="view"><button data-view="alarms" title="alarm cards (i)">Alarms</button>'
+              '<button data-view="island" title="one island in detail (i)">Island</button></span><select id="isl" aria-label="island">'
               + ''.join(f'<option value="{h(i["id"])}">{h(i["label"])}</option>' for i in rep.get('islands', []))
               + '</select>' if rep.get('islands') else '')
            + '<button id="maps" title="maps (m)">maps</button><button id="theme" title="theme (t)">◐</button></div>')
@@ -1290,7 +1323,8 @@ def render_html(rep, images, stamp=None):
     sub = []
     if rep['previous']:
         sub.append(f'compared with {h(rep["previous"])} · resolved since then: {rep.get("resolved", 0)}')
-    sub.append('keys: <kbd>1</kbd><kbd>2</kbd><kbd>3</kbd> levels · <kbd>j</kbd>/<kbd>k</kbd> next/previous · '
+    sub.append('keys: <kbd>1</kbd><kbd>2</kbd><kbd>3</kbd> levels · ' + ('<kbd>n</kbd> only new · ' if rep['previous'] else '')
+               + '<kbd>j</kbd>/<kbd>k</kbd> next/previous · '
                '<kbd>i</kbd> island view · <kbd>m</kbd> maps · <kbd>g</kbd> top · <kbd>t</kbd> theme')
     out.append(f'<p class="muted" style="font-size:12px;margin:2px 0">{" · ".join(sub)}</p>')
     island_of = {i['label']: i['id'] for i in rep.get('islands', [])}
@@ -1324,15 +1358,15 @@ def render_html(rep, images, stamp=None):
             + (f'<div class="hint">{h(hint)}</div>' if hint and not again else '') + '</li>'
             for a, hint, again in hints(g, seen))
         out.append(f'<section class="card" data-level="{g["level"]}" data-prov="{h(" ".join(g.get("provs", [])))}">'
-                   f'<div class="head"><span class="place"'
-                   + (f' data-island="{h(island_of[g["place"]])}" title="open the island view"' if g['place'] in island_of else '')
-                   + f'>{h(g["place"])}</span>'
-                   f'<span class="kind">{h(KIND_LABEL.get(g["kind"], g["kind"]))}</span>'
+                   + f'<div class="head">'
+                   + (f'<button class="place" data-island="{h(island_of[g["place"]])}" title="open the island view">{h(g["place"])}</button>'
+                      if g['place'] in island_of else f'<span class="place">{h(g["place"])}</span>')
+                   + f'<span class="kind">{h(KIND_LABEL.get(g["kind"], g["kind"]))}</span>'
                    + (f'<span class="detail">{h(g["detail"])}</span>' if g['detail'] else '')
                    + f'</div><ul>{items}</ul></section>')
     out.append('</div><p id="none" class="muted" hidden>No alarms with the current filters.</p>')
     for s in rep['sections']:
-        prov = '' if s['id'] == 'forces' else f' data-prov="{h(s["id"])}"'
+        prov = f' data-prov="{"all" if s["id"] == "forces" else h(s["id"])}"'   # forces: only with the "all" filter
         out.append(f'<details class="sec" id="sec-{h(s["id"])}" open{prov}><summary><h2>{h(s["title"])}</h2></summary>')
         if s['elapsed_min'] is not None: out.append(f'<p class="muted">{h(elapsed_text(s["elapsed_min"]))}</p>')
         img = images.get(s['id'])
