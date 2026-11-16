@@ -235,6 +235,15 @@ name starts with it, or the area belongs to a player with a custom company name 
 typed text starts with it (`custom_name`; several matches give `custom_name_candidates`). Treat it
 as a guess.
 
+### Ship names
+
+A ship's default name is `Nameable/VehicleTextGuid` (see above). A typed ship name goes to the
+same `UserGeneratedTexts` list as city names, with no link to the ship that we found. `extract`
+writes each ship's `meta_id` (its `MetaPersistent/MetaID`), so you can name ships yourself with
+`--ship-names FILE`, a JSON object `{"<MetaID>": "name"}`; keys starting with `_` are ignored.
+The name is added as `custom_name` to fleet ships and to trade route ships. Whether a MetaID stays
+the same across saves is not verified yet.
+
 ### Residents' consumption (not computed)
 
 Each house type lists its needs in `assets.xml` under `Values/Residence7/NeedsList` (`Need` +

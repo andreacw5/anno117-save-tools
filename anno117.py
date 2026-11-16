@@ -3,7 +3,7 @@
 anno117.py - read Anno 117: Pax Romana save games and game data. Python 3.8+, no dependencies.
 
 Commands:
-  extract <save.a8s> [-o DIR] [--names FILE ...] [--texts FILE ...] [--city-names FILE] [--radius R]
+  extract <save.a8s> [-o DIR] [--names FILE ...] [--texts FILE ...] [--city-names FILE] [--ship-names FILE] [--radius R]
         One JSON file per session (province): ships with names, modules and positions, land
         units and pirate factions, grouped by owner (participant); every area (island) with its
         owner, fertilities, warehouse, buildings, population, production per minute, income,
@@ -286,7 +286,8 @@ def session(sroot, owners, names, gmap, radius, texts=None, info=None):
         if smo is not None:
             mods = ship_modules(smo)
             nm = ship_name(ob, texts or {})
-            ships[owner][g].append({**({'name': nm} if nm else {}), 'role': ship_role(g, mods, info, gmap),
+            ships[owner][g].append({**({'meta_id': u(mid.value)} if mid is not None else {}),
+                                    **({'name': nm} if nm else {}), 'role': ship_role(g, mods, info, gmap),
                                     'modules': [name(m) for m in mods],
                                     'module_guids': mods,
                                     'position': [round(pos[0]), round(pos[2])]})
@@ -376,6 +377,18 @@ def apply_city_names(sessions, path):
             if nm:
                 e['custom_name'] = nm; e['custom_name_source'] = 'city-names file'
                 e.pop('custom_name_candidates', None)
+
+def apply_ship_names(results, path):
+    """Ship names you typed in the game, from a JSON file {"<MetaID>": "name"} (keys starting with
+    "_" are notes). Set as `custom_name` on fleet and trade route ships. The save stores the typed
+    text but no link to the ship, as for cities."""
+    if not path: return
+    m = {k: v for k, v in read_json(path).items() if not k.startswith('_') and v}
+    for r in results:
+        fleet = [s for p in r['participants'] for t in p['ships'] for s in t['ships']]
+        for s in fleet + [s for rt in r.get('trade_routes', []) for s in rt['ships']]:
+            nm = m.get(str(s.get('meta_id')))
+            if nm: s['custom_name'] = nm
 
 def storage(b):
     """Decode a StrgLrg value: N good GUIDs then N amounts, all uint32. The first GUID is
@@ -703,7 +716,7 @@ def participant_kind(g, info, humans):
 def name_paths(a):
     return a.names if a.names else ['guid_names.json'] if os.path.exists('guid_names.json') else []
 
-def extract_results(save, paths, texts_files=None, city_names=None, radius=40):
+def extract_results(save, paths, texts_files=None, city_names=None, radius=40, ship_names=None):
     """Everything `extract` writes, as one dict per session."""
     gmap, info = load_names(paths), load_info(paths)
     data_root = load_save(save)
@@ -729,11 +742,12 @@ def extract_results(save, paths, texts_files=None, city_names=None, radius=40):
     name_cities([e for r in results for e in r['areas']], utexts, set(humans))
     apply_city_names([(r['session'], r['areas']) for r in results], city_names)
     attach_routes(results, trade_routes(data_root), ships, names, gmap)
+    apply_ship_names(results, ship_names)
     return results
 
 def cmd_extract(a):
     os.makedirs(a.output, exist_ok=True)
-    results = extract_results(a.save, name_paths(a), a.texts, a.city_names, a.radius)
+    results = extract_results(a.save, name_paths(a), a.texts, a.city_names, a.radius, a.ship_names)
     for res in results:
         label = res['session']
         p = os.path.join(a.output, label + '.json')
@@ -2294,6 +2308,8 @@ def main():
     e.add_argument('--radius', type=float, default=40, help='squadron clustering radius (default 40)')
     e.add_argument('--city-names', metavar='FILE',
                    help='JSON {"<area id>" or "<session>:<area id>": "name"} with the names you gave your cities')
+    e.add_argument('--ship-names', metavar='FILE',
+                   help='JSON {"<MetaID>": "name"} with the names you gave your ships (meta_id in the output)')
     e.add_argument('--texts', action='append', metavar='FILE',
                    help='texts_<lang>.xml (as extracted by `assets`) to name the areas\' default cities')
     s = sub.add_parser('assets', help='game files -> GUID name map')
