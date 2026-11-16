@@ -577,17 +577,20 @@ class TestRouteFlows(unittest.TestCase):
         self.assertNotIn('name', got[1])
         self.assertEqual(got[2], {'meta_id': 9})
 
-    def test_ship_names_file_names_fleet_and_route_ships(self):
+    def test_names_file_names_ships_and_land_units(self):
         ship = {'meta_id': 7, 'name': 'Zenobia II'}
         route_ship = {'meta_id': 7, 'name': 'Zenobia II'}
-        results = [{'participants': [{'ships': [{'ships': [ship, {'meta_id': 8}]}]}],
+        legion = {'meta_id': 9, 'name': 'Lupa III'}
+        results = [{'participants': [{'ships': [{'ships': [ship, {'meta_id': 8}]}],
+                                      'units': [{'units': [legion]}]}],
                     'trade_routes': [{'ships': [route_ship]}]}]
         with tempfile.NamedTemporaryFile('w', suffix='.json', delete=False) as f:
-            json.dump({'_nota': 'x', '7': 'Annona I', '8': ''}, f)
-        A.apply_ship_names(results, f.name)
+            json.dump({'_nota': 'x', '7': 'Annona I', '8': '', '9': 'Legio XXII Deiotariana'}, f)
+        A.apply_unit_names(results, f.name)
         os.unlink(f.name)
         self.assertEqual(ship['custom_name'], 'Annona I')
         self.assertEqual(route_ship['custom_name'], 'Annona I')
+        self.assertEqual(legion['custom_name'], 'Legio XXII Deiotariana')
         self.assertNotIn('custom_name', results[0]['participants'][0]['ships'][0]['ships'][1])
 
     def test_cross_province_legs_and_border(self):

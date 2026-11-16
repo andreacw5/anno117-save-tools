@@ -3,7 +3,7 @@
 anno117.py - read Anno 117: Pax Romana save games and game data. Python 3.8+, no dependencies.
 
 Commands:
-  extract <save.a8s> [-o DIR] [--names FILE ...] [--texts FILE ...] [--city-names FILE] [--ship-names FILE] [--radius R]
+  extract <save.a8s> [-o DIR] [--names FILE ...] [--texts FILE ...] [--city-names FILE] [--unit-names FILE] [--radius R]
         One JSON file per session (province): ships with names, modules and positions, land
         units and pirate factions, grouped by owner (participant); every area (island) with its
         owner, fertilities, warehouse, buildings, population, production per minute, income,
@@ -266,6 +266,7 @@ def session(sroot, owners, names, gmap, radius, texts=None, info=None):
     name = lambda g: gmap.get(g, f'GUID {g}')
     ships = collections.defaultdict(lambda: collections.defaultdict(list))
     units = collections.defaultdict(collections.Counter)
+    unit_list = collections.defaultdict(lambda: collections.defaultdict(list))
     pirates = []
     for ob in session_objects(sroot):
         gn = one(ob, 'guid')
@@ -293,6 +294,10 @@ def session(sroot, owners, names, gmap, radius, texts=None, info=None):
                                     'position': [round(pos[0]), round(pos[2])]})
         elif one(ob, 'Unit') is not None:
             units[owner][g] += 1
+            nm = ship_name(ob, texts or {})                            # land units use the same Nameable
+            unit_list[owner][g].append({**({'meta_id': u(mid.value)} if mid is not None else {}),
+                                        **({'name': nm} if nm else {}),
+                                        'position': [round(pos[0]), round(pos[2])]})
     parts = []
     for owner in sorted(set(ships) | set(units), key=lambda x: (x is None, x or 0)):
         sh = ships.get(owner, {})
@@ -307,8 +312,8 @@ def session(sroot, owners, names, gmap, radius, texts=None, info=None):
             'troops': sum(n for g, n in un.items() if troop(g)),
             'ships': [{'type': name(g), 'guid': g, 'count': len(v), 'ships': v} for g, v in sorted(sh.items())],
             'squadrons': cluster([tuple(s['position']) for v in sh.values() for s in v], radius),
-            'units': [{'type': name(g), 'guid': g, 'count': n, **({'troop': True} if troop(g) else {})}
-                      for g, n in sorted(un.items())],
+            'units': [{'type': name(g), 'guid': g, 'count': n, **({'troop': True} if troop(g) else {}),
+                       'units': unit_list[owner][g]} for g, n in sorted(un.items())],
         })
     return {'participants': parts, 'pirates': pirates}
 
@@ -378,15 +383,16 @@ def apply_city_names(sessions, path):
                 e['custom_name'] = nm; e['custom_name_source'] = 'city-names file'
                 e.pop('custom_name_candidates', None)
 
-def apply_ship_names(results, path):
-    """Ship names you typed in the game, from a JSON file {"<MetaID>": "name"} (keys starting with
-    "_" are notes). Set as `custom_name` on fleet and trade route ships. The save stores the typed
-    text but no link to the ship, as for cities."""
+def apply_unit_names(results, path):
+    """Ship and land unit names you typed in the game, from a JSON file {"<MetaID>": "name"} (keys
+    starting with "_" are notes). Set as `custom_name` on fleet ships, trade route ships and land
+    units. The save stores the typed text but no link to the ship or unit, as for cities."""
     if not path: return
     m = {k: v for k, v in read_json(path).items() if not k.startswith('_') and v}
     for r in results:
         fleet = [s for p in r['participants'] for t in p['ships'] for s in t['ships']]
-        for s in fleet + [s for rt in r.get('trade_routes', []) for s in rt['ships']]:
+        army = [x for p in r['participants'] for t in p.get('units', []) for x in t.get('units', [])]
+        for s in fleet + army + [s for rt in r.get('trade_routes', []) for s in rt['ships']]:
             nm = m.get(str(s.get('meta_id')))
             if nm: s['custom_name'] = nm
 
@@ -716,7 +722,7 @@ def participant_kind(g, info, humans):
 def name_paths(a):
     return a.names if a.names else ['guid_names.json'] if os.path.exists('guid_names.json') else []
 
-def extract_results(save, paths, texts_files=None, city_names=None, radius=40, ship_names=None):
+def extract_results(save, paths, texts_files=None, city_names=None, radius=40, unit_names=None):
     """Everything `extract` writes, as one dict per session."""
     gmap, info = load_names(paths), load_info(paths)
     data_root = load_save(save)
@@ -742,12 +748,12 @@ def extract_results(save, paths, texts_files=None, city_names=None, radius=40, s
     name_cities([e for r in results for e in r['areas']], utexts, set(humans))
     apply_city_names([(r['session'], r['areas']) for r in results], city_names)
     attach_routes(results, trade_routes(data_root), ships, names, gmap)
-    apply_ship_names(results, ship_names)
+    apply_unit_names(results, unit_names)
     return results
 
 def cmd_extract(a):
     os.makedirs(a.output, exist_ok=True)
-    results = extract_results(a.save, name_paths(a), a.texts, a.city_names, a.radius, a.ship_names)
+    results = extract_results(a.save, name_paths(a), a.texts, a.city_names, a.radius, a.unit_names)
     for res in results:
         label = res['session']
         p = os.path.join(a.output, label + '.json')
@@ -2336,8 +2342,8 @@ def main():
     e.add_argument('--radius', type=float, default=40, help='squadron clustering radius (default 40)')
     e.add_argument('--city-names', metavar='FILE',
                    help='JSON {"<area id>" or "<session>:<area id>": "name"} with the names you gave your cities')
-    e.add_argument('--ship-names', metavar='FILE',
-                   help='JSON {"<MetaID>": "name"} with the names you gave your ships (meta_id in the output)')
+    e.add_argument('--unit-names', '--ship-names', metavar='FILE',
+                   help='JSON {"<MetaID>": "name"} with the names you gave your ships and land units (meta_id in the output)')
     e.add_argument('--texts', action='append', metavar='FILE',
                    help='texts_<lang>.xml (as extracted by `assets`) to name the areas\' default cities')
     s = sub.add_parser('assets', help='game files -> GUID name map')
