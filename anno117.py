@@ -1030,52 +1030,78 @@ def group_at(items, radius=60):
     return [{'position': [round(c) for c in g['c']], 'items': g['items']} for g in sorted(gs, key=lambda g: -len(g['items']))]
 
 def army_view(cur, humans, kinds):
-    """Per province: the player's warships, troops and idle civil ships in groups, pirate warships,
-    and a summary row. `spare` is a rule of thumb, not a game value: warships beyond two per pirate
-    warship in that province (all of them when there are no pirate warships)."""
+    """Per province, the player's fleet (warships, merchant ships by trade route, idle merchant
+    ships) and troops, grouped by place and named after the nearest island, with the pirates there.
+    `spare` is a rule of thumb, not a game value: warships beyond two per pirate warship in that
+    province (all of them when there are no pirate warships)."""
     label = lambda x: x.get('custom_name') or x.get('name') or ''
     def comp(items, mods=False):
-        c = collections.Counter(x['type'] + (f" ({', '.join(x['modules'])})" if mods and x.get('modules') else '')
-                                for x in items)
-        return ', '.join(f'{n} × {t}' for t, n in c.most_common())
-    def names(items): return ', '.join(n for n in map(label, items) if n)
-    pos = lambda g: f"{g['position'][0]}, {g['position'][1]}"
+        c = collections.Counter((x['type'], ', '.join(x.get('modules') or []) if mods else '') for x in items)
+        return [f'{n} × {t}' + (f' · {m}' if m else '') for (t, m), n in c.most_common()]
+    names = lambda items: [n for n in map(label, items) if n]
     ships = lambda ps, role: [dict(x, type=t['type']) for p in ps for t in p.get('ships', [])
                              for x in t.get('ships', []) if isinstance(x, dict) and x.get('role') == role and 'position' in x]
+    troops_of = lambda ps: [dict(x, type=t['type']) for p in ps for t in p.get('units', []) if t.get('troop')
+                            for x in t.get('units', []) if 'position' in x]
     out = []
     for r in cur:
+        centers = [(e['center'], city_of(e)) for e in r.get('areas', []) if e.get('center')]
+        def where(pos):
+            near = min(centers, key=lambda c: math.dist(c[0], pos), default=None)
+            at = f'{pos[0]}, {pos[1]}'
+            if near is None: return [at]
+            return [near[1] if math.dist(near[0], pos) < 200 else f'off {near[1]}', at]
         mine = [p for p in r['participants'] if p['participant'] in humans]
         pirates = [p for p in r['participants'] if kinds.get(str(p['participant'])) == 'pirate']
         war, civil, pwar = ships(mine, 'war'), ships(mine, 'civil'), ships(pirates, 'war')
-        troops = [dict(x, type=t['type']) for p in mine for t in p.get('units', []) if t.get('troop') for x in t.get('units', []) if 'position' in x]
+        troops, ptroops = troops_of(mine), troops_of(pirates)
         n_troops = sum(p.get('troops') or 0 for p in mine)
         rivals = sum(p.get('warships') or 0 for p in r['participants']
                      if p['participant'] is not None and p['participant'] not in humans
                      and kinds.get(str(p['participant'])) not in ('pirate', 'npc'))
+        routes = [rt for rt in r.get('trade_routes', []) if rt.get('owner') in humans]
+        here = lambda rt: [x for x in rt.get('ships', []) if isinstance(x, dict) and x.get('session') == r['session']]
         routed = {x.get('meta_id') for rt in r.get('trade_routes', []) for x in rt.get('ships', []) if isinstance(x, dict)}
         idle = None if any('meta_id' not in x for x in civil) else [x for x in civil if x['meta_id'] not in routed]
         spare = max(0, len(war) - 2 * len(pwar))
         state = ('needs reinforcements' if len(war) < len(pwar) else 'can spare ships' if spare
                  else 'holding' if war or pwar else '')
-        tables = []
+        n = lambda k: (str(k), k)
+        fleet = []
         if war:
-            tables.append({'title': 'Your warships', 'headers': ['Where', 'Ships', 'Ships and modules', 'Names'],
-                           'rows': [[pos(g), (str(len(g['items'])), len(g['items'])), comp(g['items'], True), names(g['items'])]
-                                    for g in group_at(war)]})
-        if troops:
-            tables.append({'title': 'Your troops', 'headers': ['Where', 'Troops', 'Units', 'Names'],
-                           'rows': [[pos(g), (str(len(g['items'])), len(g['items'])), comp(g['items']), names(g['items'])]
-                                    for g in group_at(troops)]})
+            fleet.append({'title': 'Warships', 'headers': ['Where', 'Ships', 'Ships and modules', 'Names'],
+                          'rows': [[where(g['position']), n(len(g['items'])), comp(g['items'], True), names(g['items'])]
+                                   for g in group_at(war)]})
+        on_routes = sorted(((rt, here(rt)) for rt in routes if here(rt)), key=lambda x: -len(x[1]))
+        if on_routes:
+            fleet.append({'title': 'Merchant ships on your trade routes', 'headers': ['Route', 'Ships', 'Ship types', 'Stops'],
+                          'rows': [[rt['name'], n(len(sh)), comp(sh),
+                                    ' → '.join(st.get('city') or f"area {st['area']}" for st in rt.get('stations', []))]
+                                   for rt, sh in on_routes]})
         if idle:
-            tables.append({'title': 'Civil ships on no trade route', 'collapsed': True,
-                           'headers': ['Where', 'Ship', 'Name'],
-                           'rows': [[f"{x['position'][0]}, {x['position'][1]}", x['type'], label(x)] for x in idle]})
+            fleet.append({'title': 'Merchant ships on no trade route', 'headers': ['Where', 'Ships', 'Ship types', 'Names'],
+                          'rows': [[where(g['position']), n(len(g['items'])), comp(g['items']), names(g['items'])]
+                                   for g in group_at(idle)]})
         if pwar:
-            tables.append({'title': 'Pirate warships', 'headers': ['Where', 'Ships', 'Ships'],
-                           'rows': [[pos(g), (str(len(g['items'])), len(g['items'])), comp(g['items'])] for g in group_at(pwar)]})
+            fleet.append({'title': 'Pirate warships', 'headers': ['Where', 'Ships', 'Ship types'],
+                          'rows': [[where(g['position']), n(len(g['items'])), comp(g['items'])] for g in group_at(pwar)]})
+        army = []
+        if troops:
+            army.append({'title': 'Your troops', 'headers': ['Where', 'Units', 'Unit types', 'Names'],
+                         'rows': [[where(g['position']), n(len(g['items'])), comp(g['items']), names(g['items'])]
+                                  for g in group_at(troops)]})
+        if ptroops:
+            army.append({'title': 'Pirate troops', 'headers': ['Where', 'Units', 'Unit types'],
+                         'rows': [[where(g['position']), n(len(g['items'])), comp(g['items'])] for g in group_at(ptroops)]})
+        for t in fleet + army:                       # no names typed yet: drop the empty column
+            keep = [i for i in range(len(t['headers'])) if any(row[i] not in ('', []) for row in t['rows'])]
+            t['headers'] = [t['headers'][i] for i in keep]; t['rows'] = [[row[i] for i in keep] for row in t['rows']]
         out.append({'id': r['session'], 'title': r['session'].capitalize(), 'warships': len(war), 'pirates': len(pwar),
-                    'rivals': rivals, 'spare': spare, 'troops': n_troops, 'civil': len(civil),
-                    'idle': None if idle is None else len(idle), 'state': state, 'tables': tables})
+                    'rivals': rivals, 'spare': spare, 'state': state, 'merchant': len(civil),
+                    'on_routes': len(civil) - len(idle) if idle is not None else None,
+                    'idle': None if idle is None else len(idle),
+                    'troops': n_troops, 'troop_types': comp(troops), 'troop_groups': len(group_at(troops)),
+                    'pirate_troops': len(ptroops), 'fleet': fleet, 'army': army})
     return out
 
 def report_data(cur, prev, humans, horizon=60, _inner=False):
@@ -1405,7 +1431,13 @@ body{margin:0;background:var(--ground);color:var(--ink);font:14px/1.45 var(--tex
 padding-right:max(16px,env(safe-area-inset-right,0px))}
 .bar{position:sticky;top:0;z-index:5;background:var(--ground);border-bottom:1px solid var(--rule)}
 .bar .wrap{display:flex;flex-wrap:wrap;align-items:center;gap:6px 12px;padding-block:8px}
-.bar .r2{padding-block:0 8px}
+.bar .r2{padding-block:0;align-items:flex-end;gap:0 16px}
+.tabs{display:flex;gap:4px;overflow-x:auto;scrollbar-width:none;margin-bottom:-1px}.tabs::-webkit-scrollbar{display:none}
+.tabs button{border:0;border-bottom:2px solid transparent;border-radius:0;padding:10px 10px 9px;white-space:nowrap;
+text-transform:uppercase;letter-spacing:.08em;color:var(--ink-2)}
+.tabs button:hover{color:var(--ink);border-bottom-color:var(--rule)}
+.tabs button[aria-selected=true]{color:var(--ochre);border-bottom-color:var(--ochre)}
+.tools{display:flex;flex-wrap:wrap;align-items:center;gap:6px 12px;padding-block:6px;margin-left:auto}
 .mark{font:21px/1 var(--display);font-variant:small-caps;letter-spacing:.07em;color:var(--ochre)}
 .save{display:flex;flex-direction:column;min-width:0;max-width:52ch;font-size:12px;color:var(--ink-2);line-height:1.3}
 .save b{color:var(--ink);font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
@@ -1414,15 +1446,13 @@ padding-right:max(16px,env(safe-area-inset-right,0px))}
 button{font:600 12px/1 var(--text);color:var(--ink-2);background:transparent;border:1px solid var(--rule);
 border-radius:999px;padding:6px 11px;cursor:pointer}
 button:hover{color:var(--ink);border-color:var(--ink-3)}button:disabled{opacity:.35;cursor:default}
-button.prov,.seg button{text-transform:uppercase;letter-spacing:.05em}
-button.prov[aria-pressed=true],.seg button[aria-pressed=true]{background:var(--ochre);border-color:var(--ochre);color:var(--ochre-ink)}
+button.prov{text-transform:uppercase;letter-spacing:.05em}
+button.prov[aria-pressed=true]{background:var(--ochre);border-color:var(--ochre);color:var(--ochre-ink)}
 button.lvl[aria-pressed=false],#onlynew[aria-pressed=false]{border-style:dashed}
 button.lvl.high[aria-pressed=true]{color:var(--high);background:var(--high-bg);border-color:var(--high)}
 button.lvl.medium[aria-pressed=true]{color:var(--medium);background:var(--medium-bg);border-color:var(--medium)}
 button.lvl.info[aria-pressed=true]{color:var(--info);background:var(--info-bg);border-color:var(--info)}
 #onlynew[aria-pressed=true]{color:var(--new);border-color:var(--new)}
-.seg{display:inline-flex}.seg button{border-radius:0}.seg button:first-child{border-radius:999px 0 0 999px}
-.seg button+button{border-radius:0 999px 999px 0;margin-left:-1px}
 #theme{width:30px;height:30px;padding:0;display:grid;place-items:center}
 select{font:inherit;font-size:12px;color:var(--ink);background:var(--slab);border:1px solid var(--rule);border-radius:6px;
 padding:4px 6px;max-width:100%}
@@ -1515,7 +1545,9 @@ img{max-width:100%;border-radius:6px;border:1px solid var(--rule)}
 footer{color:var(--ink-3);font-size:12px;border-top:1px solid var(--rule);padding-top:14px;display:grid;gap:6px}
 kbd{font:11px var(--text);border:1px solid var(--rule);border-radius:3px;padding:0 4px;color:var(--ink-2)}
 @media (max-width:640px){.row{grid-template-columns:68px minmax(0,1fr)}.gauge{grid-column:2;justify-items:start;width:100%}
-.when{font-size:21px}.chips+.chips{padding-left:0;border-left:0}.save{max-width:100%}}
+.when{font-size:21px}.chips+.chips{padding-left:0;border-left:0}.save{max-width:100%}
+.save{display:none}.bar .r2{flex-direction:column;align-items:stretch}.tools{margin-left:0;padding-top:0}
+.tools:not(:has(>:not([hidden]))){display:none}}
 @media (prefers-reduced-motion:no-preference){button:not(.place):hover{transition:color .15s,border-color .15s}}
 """
 
@@ -1526,7 +1558,8 @@ const $=s=>document.querySelector(s),$$=s=>[...document.querySelectorAll(s)];
 const R=document.documentElement,B=window.__REPORT,HZ=B.horizon||60;
 R.dataset.theme=S.get('theme',window.matchMedia&&matchMedia('(prefers-color-scheme: light)').matches?'light':'dark');
 let hidden=new Set(S.get('hidden',['info'])),prov=S.get('prov','all'),onlyNew=S.get('onlyNew',false);
-const NB=$('#onlynew'),VI=$('#v-island'),VA=$('#v-alarms'),VF=$('#v-forces'),SEL=$('#isl');
+const NB=$('#onlynew'),VI=$('#v-island'),VA=$('#v-alarms'),VF=$('#v-fleet'),VT=$('#v-troops'),SEL=$('#isl');
+const VIEWS={alarms:VA,island:VI,fleet:VF,troops:VT},TABS=$$('.tabs [role=tab]');
 // an element with data-prov shows for "all" and for each province it lists; data-prov="all" only for "all"
 const inProv=el=>{const p=el.dataset.prov;return !p||prov==='all'||p.split(' ').includes(prov)};
 function apply(){
@@ -1609,20 +1642,23 @@ function go(d){if(VA.hidden)return;const v=$$('#v-alarms .row,#v-alarms .item').
   focusEl(v[Math.max(0,Math.min(v.length-1,i))])}
 function showIsland(id){if(!SEL)return;if(id&&[...SEL.options].some(o=>o.value===id))SEL.value=id;S.set('island',SEL.value);
   $$('.isl').forEach(x=>x.hidden=x.dataset.id!==SEL.value)}
-function view(v){if(!VI)return;if(v==='forces'&&!VF)v='alarms';
-  VI.hidden=v!=='island';VA.hidden=v!=='alarms';if(VF)VF.hidden=v!=='forces';
-  $$('.seg button').forEach(b=>b.setAttribute('aria-pressed',b.dataset.view===v));
-  $$('button.lvl,button.prov,#onlynew').forEach(b=>b.disabled=v!=='alarms');   // they filter the overview only
+function view(v){if(!VIEWS[v])v='alarms';
+  for(const k in VIEWS)if(VIEWS[k])VIEWS[k].hidden=k!==v;
+  TABS.forEach(b=>{const on=b.dataset.view===v;b.setAttribute('aria-selected',on);b.tabIndex=on?0:-1});
+  $$('[data-for]').forEach(el=>el.hidden=!el.dataset.for.split(' ').includes(v));   // only the current view's controls
   S.set('view',v);scrollTo(0,0);if(v==='alarms')scale()}
+TABS.forEach((b,i)=>{b.onclick=()=>view(b.dataset.view);
+  b.onkeydown=e=>{const d=e.key==='ArrowRight'?1:e.key==='ArrowLeft'?-1:0;if(!d)return;e.preventDefault();
+    const t=TABS[(i+d+TABS.length)%TABS.length];view(t.dataset.view);t.focus()}});
 if(SEL){showIsland(S.get('island',SEL.value));SEL.onchange=()=>{showIsland(SEL.value);view('island')};
-  $$('.seg button').forEach(b=>b.onclick=()=>view(b.dataset.view));
   $$('button.place[data-island]').forEach(p=>p.onclick=()=>{showIsland(p.dataset.island);view('island')})}
 document.addEventListener('keydown',e=>{if(e.ctrlKey||e.metaKey||e.altKey||/input|select|textarea/i.test(e.target.tagName))return;
   const k=e.key;if(k==='1')toggle('high');else if(k==='2')toggle('medium');else if(k==='3')toggle('info');else if(k==='n')toggleNew();
   else if(k==='j')go(1);else if(k==='k')go(-1);else if(k==='m')maps();else if(k==='g')scrollTo(0,0);
   else if(k==='t')$('#theme').click();else if(k==='r')location.reload();
   else if(k==='i'&&VI)view(VI.hidden?'island':'alarms');
-  else if(k==='f'&&VF)view(VF.hidden?'forces':'alarms')});
+  else if(k==='f'&&VF)view(VF.hidden?'fleet':'alarms');
+  else if(k==='u'&&VT)view(VT.hidden?'troops':'alarms')});
 let rz;addEventListener('resize',()=>{clearTimeout(rz);rz=setTimeout(scale,120)});
 try{const y=sessionStorage.getItem('anno117:y');if(y!==null){sessionStorage.removeItem('anno117:y');scrollTo(0,+y)}}catch(e){}
 if(B.stamp){let wait=5000;const poll=()=>{const s=document.createElement('script');
@@ -1630,7 +1666,7 @@ if(B.stamp){let wait=5000;const poll=()=>{const s=document.createElement('script
   s.onload=()=>{s.remove();if(window.__annoStamp&&window.__annoStamp!==B.build){
     try{sessionStorage.setItem('anno117:y',String(window.scrollY))}catch(e){}location.reload()}else setTimeout(poll,wait)};
   s.onerror=()=>{s.remove();setTimeout(poll,30000)};document.head.appendChild(s)};setTimeout(poll,wait)}
-if(SEL)view(S.get('view','alarms'));
+view(S.get('view','alarms'));
 apply();
 """
 
@@ -1649,6 +1685,8 @@ def render_html(rep, images, stamp=None):
     island_of = {i['label']: i['id'] for i in rep.get('islands', [])}
     detail_of = {(g['kind'], g['place']): g['detail'] for g in rep['groups']}
     def td(c):
+        if isinstance(c, list):
+            return '<td>' + '<br>'.join(h(str(x)) for x in c) + '</td>'
         if isinstance(c, tuple):
             v = '' if c[1] is None else f' data-v="{c[1]}"'
             return f'<td class="num"{v}>{h(c[0])}</td>'
@@ -1685,7 +1723,9 @@ def render_html(rep, images, stamp=None):
     prev = rep['previous']
 
     # ---- masthead and filters
-    bar = ('<header class="bar"><div class="wrap"><span class="mark">Acta Imperii</span>'
+    views = ([('alarms', 'Overview', 'o')] + ([('island', 'Islands', 'i')] if rep.get('islands') else [])
+             + ([('fleet', 'Fleet', 'f'), ('troops', 'Troops', 'u')] if rep.get('army') else []))
+    bar = ('<header class="bar"><div class="wrap r1"><span class="mark">Acta Imperii</span>'
            f'<div class="save"><b title="{h(rep["save"] or "")}">{h(rep["save"] or "")}</b><span>'
            + (f'compared with {h(prev)}' if prev else 'no previous save to compare with (--compare)') + '</span></div>'
            '<span class="grow"></span><span class="age" id="age"></span>'
@@ -1693,23 +1733,23 @@ def render_html(rep, images, stamp=None):
            '<button id="theme" title="light or dark (t)" aria-label="light or dark"><svg width="16" height="16" viewBox="0 0 16 16" '
            'aria-hidden="true"><circle cx="8" cy="8" r="6" fill="none" stroke="currentColor" stroke-width="1.5"/>'
            '<path d="M8 2a6 6 0 0 1 0 12z" fill="currentColor"/></svg></button></div>'
-           '<div class="wrap r2"><div class="chips" role="group" aria-label="province">'
+           '<div class="wrap r2"><nav class="tabs" role="tablist" aria-label="view">'
+           + ''.join(f'<button role="tab" id="tab-{v}" data-view="{v}" aria-controls="v-{v}" aria-selected="false" '
+                     f'tabindex="-1" title="{t} ({k})">{t}</button>' for v, t, k in views)
+           + '</nav><div class="tools">'
+           '<div class="chips" role="group" aria-label="province" data-for="alarms fleet troops">'
            '<button class="prov" data-prov="all">all</button>'
            + ''.join(f'<button class="prov" data-prov="{h(p)}">{h(p)}</button>' for p in provs)
-           + '</div><div class="chips" role="group" aria-label="alarm level">'
+           + '</div><div class="chips" role="group" aria-label="alarm level" data-for="alarms">'
            + ''.join(f'<button class="lvl {l}" data-level="{l}" title="show/hide ({k})">{l}</button>'
                      for l, k in (('high', 1), ('medium', 2), ('info', 3)))
            + (f'<button id="onlynew" aria-pressed="false" title="only what is new since the previous save (n)">only new</button>'
               if prev else '')
-           + '</div><span class="grow"></span>'
-           + ('<span class="seg" role="group" aria-label="view"><button data-view="alarms" title="overview (i)">overview</button>'
-              '<button data-view="island" title="one island in detail (i)">island</button>'
-              + ('<button data-view="forces" title="ships and troops in every province (f)">forces</button>' if rep.get('army') else '')
-              + '</span>'
-              '<select id="isl" aria-label="island">'
+           + '</div>'
+           + ('<select id="isl" aria-label="island" data-for="island">'
               + ''.join(f'<option value="{h(i["id"])}">{h(i["label"])}</option>' for i in rep.get('islands', []))
               + '</select>' if rep.get('islands') else '')
-           + '</div></header>')
+           + '</div></div></header>')
     out = ['<!doctype html><html lang="en" data-theme="dark"><head><meta charset="utf-8">',
            '<meta name="viewport" content="width=device-width,initial-scale=1">',
            f'<title>Anno 117 report</title><style>{HTML_STYLE}</style>',
@@ -1717,7 +1757,7 @@ def render_html(rep, images, stamp=None):
 
     # ---- island view
     if rep.get('islands'):
-        out.append('<div id="v-island" hidden>')
+        out.append('<div id="v-island" role="tabpanel" aria-labelledby="tab-island" hidden>')
         for i in rep['islands']:
             al = ''.join(f'<li data-level="{a["level"]}"><span>' + (new_tag if a.get('new') else '')
                          + h(a['text']) + '</span></li>' for a in i['alarms'])
@@ -1726,27 +1766,38 @@ def render_html(rep, images, stamp=None):
                        + (f'<ul class="list">{al}</ul>' if al else '<p class="muted">No alarms on this island.</p>')
                        + ''.join(table(t, count=True) for t in i['tables']) + '</section>')
         out.append('</div>')
-    # ---- forces view: ships and troops of every province, to see where reinforcements can come from
+    # ---- fleet and troops: every province, to see where reinforcements can come from
     if rep.get('army'):
         num = lambda v: ('', None) if v is None else (str(v), v)
-        summary = {'title': 'Where to find reinforcements',
-                   'note': 'Spare = your warships beyond two per pirate warship in that province: a rule of thumb, '
-                           'not a game value. Idle civil ships sail on no trade route.',
-                   'headers': ['Province', 'Your warships', 'Pirate warships', 'Rival warships', 'Spare',
-                               'Your troops', 'Idle civil ships', 'State'],
-                   'rows': [[a['title'], num(a['warships']), num(a['pirates']), num(a['rivals']), num(a['spare']),
-                             num(a['troops']), num(a['idle']), a['state']] for a in rep['army']]}
-        out.append('<div id="v-forces" hidden><section><div class="head"><h2>Forces</h2>'
-                   '<p>Your ships and troops in every province, grouped by where they are (map coordinates).</p></div>'
-                   + table(summary) + '</section>')
-        for a in rep['army']:
-            out.append(f'<section class="frc"><h2>{h(a["title"])}</h2>'
-                       f'<div class="facts">{a["warships"]} warships · {a["troops"]} troops · {a["civil"]} civil ships'
-                       f' · {a["pirates"]} pirate warships</div>'
-                       + (''.join(table(t, 'forces-' + a['id'], count=True) for t in a['tables'])
-                          or '<p class="muted">Nothing here.</p>') + '</section>')
-        out.append('</div>')
-    out.append('<div id="v-alarms">')
+        def panel(vid, title, lede, summary, key, facts, empty):
+            out.append(f'<div id="v-{vid}" role="tabpanel" aria-labelledby="tab-{vid}" hidden>'
+                       f'<section><div class="head"><h2>{title}</h2><p>{lede}</p></div>' + table(summary) + '</section>')
+            for a in rep['army']:
+                out.append(f'<section class="frc" data-prov="{h(a["id"])}"><h2>{h(a["title"])}</h2>'
+                           f'<div class="facts">{h(facts(a))}</div>'
+                           + (''.join(table(t, f'{vid}-' + a['id'], count=True) for t in a[key])
+                              or f'<p class="muted">{empty}</p>') + '</section>')
+            out.append('</div>')
+        panel('fleet', 'Fleet', 'Warships and merchant ships in every province, by place: nearest island and map '
+              'coordinates. Use the summary to see where ships can be spared.',
+              {'title': 'Where to find reinforcements',
+               'note': 'Spare = your warships beyond two per pirate warship in that province: a rule of thumb, not a game '
+                       'value. Rival fleets are shown but not counted, as you are not at war with them.',
+               'headers': ['Province', 'Warships', 'Pirate warships', 'Rival warships', 'Spare', 'Merchant ships',
+                           'On trade routes', 'Idle', 'State'],
+               'rows': [[a['title'], num(a['warships']), num(a['pirates']), num(a['rivals']), num(a['spare']),
+                         num(a['merchant']), num(a['on_routes']), num(a['idle']), a['state']] for a in rep['army']]},
+              'fleet', lambda a: f"{a['warships']} warships · {a['merchant']} merchant ships · {a['pirates']} pirate warships",
+              'No ships here.')
+        panel('troops', 'Troops', 'Land units in every province, by place: nearest island and map coordinates. '
+              'Each unit is one troop; an army is the group around a place.',
+              {'title': 'Troops by province',
+               'headers': ['Province', 'Your units', 'Groups', 'Pirate units', 'Unit types'],
+               'rows': [[a['title'], num(a['troops']), num(a['troop_groups']), num(a['pirate_troops']), a['troop_types']]
+                        for a in rep['army']]},
+              'army', lambda a: f"{a['troops']} units in {a['troop_groups']} groups · {a['pirate_troops']} pirate units",
+              'No troops here.')
+    out.append('<div id="v-alarms" role="tabpanel" aria-labelledby="tab-alarms">')
 
     # ---- running dry
     hz = rep.get('horizon', 60)
@@ -1879,7 +1930,7 @@ def render_html(rep, images, stamp=None):
         out.append('</section>')
     out.append('</div>')
     out.append('<footer><span>Keys: <kbd>1</kbd> <kbd>2</kbd> <kbd>3</kbd> levels · ' + ('<kbd>n</kbd> only new · ' if prev else '')
-               + '<kbd>j</kbd>/<kbd>k</kbd> next/previous · <kbd>i</kbd> island view · <kbd>f</kbd> forces · <kbd>m</kbd> maps · <kbd>g</kbd> top · '
+               + '<kbd>j</kbd>/<kbd>k</kbd> next/previous · <kbd>i</kbd> islands · <kbd>f</kbd> fleet · <kbd>u</kbd> troops · <kbd>m</kbd> maps · <kbd>g</kbd> top · '
                '<kbd>t</kbd> theme · <kbd>r</kbd> reload</span>'
                + (f'<span>Resolved since the previous save: {rep.get("resolved", 0)}.</span>' if prev else '')
                + '<span>Made with anno117.py report. Trends come from the warehouse chart stored in the save (last 20 '

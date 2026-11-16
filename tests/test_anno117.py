@@ -614,14 +614,21 @@ class TestRouteFlows(unittest.TestCase):
                      {'meta_id': 6, 'custom_name': 'XXII Sagittarii I', 'position': [50, 50]},
                      {'meta_id': 7, 'position': [52, 50]}]}]},
                 {'participant': 99, 'warships': 1, 'ships': [{'type': 'Aba', 'ships': [war(8, 500)]}]}],
-             'trade_routes': [{'ships': [{'meta_id': 4}]}]}
+             'areas': [{'area': 1, 'custom_name': 'Memphis', 'center': [100, 90]}],
+             'trade_routes': [{'name': 'Annona Mem - Cin', 'owner': 41, 'ships': [{'meta_id': 4, 'session': 'nile',
+                                'type': 'Aba'}], 'stations': [{'area': 1, 'city': 'Memphis'}, {'area': 9, 'city': 'Cinis'}]}]}
         a = A.army_view([r], {41}, {'99': 'pirate'})[0]
-        self.assertEqual((a['warships'], a['pirates'], a['spare'], a['idle'], a['state']),
-                         (3, 1, 1, 1, 'can spare ships'))
-        ships = next(t for t in a['tables'] if t['title'] == 'Your warships')['rows']
-        self.assertEqual([r[1][1] for r in ships], [2, 1])           # two near each other, one apart
-        troops = next(t for t in a['tables'] if t['title'] == 'Your troops')['rows']
-        self.assertEqual(troops[0][2:], ['2 × Arcieri', 'XXII Sagittarii I'])
+        self.assertEqual((a['warships'], a['pirates'], a['spare'], a['merchant'], a['on_routes'], a['idle'], a['state']),
+                         (3, 1, 1, 2, 1, 1, 'can spare ships'))
+        fleet = {t['title']: t['rows'] for t in a['fleet']}
+        self.assertEqual([r[1][1] for r in fleet['Warships']], [2, 1])   # two near each other, one apart
+        self.assertEqual(fleet['Warships'][0][0], ['Memphis', '105, 100'])
+        self.assertEqual(fleet['Warships'][1][0], ['off Memphis', '900, 100'])
+        self.assertEqual(a['fleet'][0]['headers'], ['Where', 'Ships', 'Ships and modules'])   # no names: no column
+        self.assertEqual(fleet['Merchant ships on your trade routes'][0],
+                         ['Annona Mem - Cin', ('1', 1), ['1 × Aba'], 'Memphis → Cinis'])
+        troops = a['army'][0]['rows']
+        self.assertEqual(troops[0][2:], [['2 × Arcieri'], ['XXII Sagittarii I']])
         r['participants'][1]['ships'][0]['ships'] += [war(9, 500), war(10, 500), war(11, 500)]
         self.assertEqual(A.army_view([r], {41}, {'99': 'pirate'})[0]['state'], 'needs reinforcements')
 
