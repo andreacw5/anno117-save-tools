@@ -167,6 +167,13 @@ stores it as `factory` and `extract` computes, per area:
   demand that is met (1.0 = every building has its workers);
 - `goods_per_minute`: production minus factory consumption. Residents' consumption and trade
   routes are **not** included.
+- `festival_active`: `AreaFestivalManager/ActiveFestivalGUID` when non-zero (a festival running).
+- `festival_meters`: per `FestivalAttributes` entry (`AttributeType/id`), `Value / Max` (float32).
+  The meters charge over time; one that is empty in a save and charging in the next means a
+  festival was held just before the first save (observed on three islands whose income then
+  fell). `report` uses this to mark such falls as temporary.
+- `timed_effects`: `AreaEffectManager/TimedEffects`, each `Guid` (name), and `EndTimestamp/value`
+  as `ends_ms`. Seen: arena games decisions and "goods overflow" effects; they can be good or bad.
 
 `PausedReasons` is not set on idle buildings; the reason is in the status icons, see `idle_reasons`.
 

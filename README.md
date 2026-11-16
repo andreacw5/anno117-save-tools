@@ -15,7 +15,9 @@ No dependencies, Python 3.8 or newer.
 - **`report`**: one HTML page (and optionally Markdown) on your state. It opens with the goods
   running dry, placed on a 0–60 minute scale with a countdown each; then what changed since an
   earlier save, the other alarms grouped by kind (idle buildings, workforce shortages, falling
-  income, routes without ships or stock) with a hint, a summary per province with the warships
+  income, routes without ships or stock) with a hint, "where to boost" (per island and good:
+  production, factory inputs and ship loads against use, with what to do: build N more, fix idle
+  buildings, change a route, ship spare output to an island in need), a summary per province with the warships
   around you (pirates in red), forces per player across all provinces, and the full per-province
   ledgers: your islands, players, fleets, troops, routes, warehouses and the map. Traders and
   imperial envoys (NPCs that cannot be attacked) are left out.

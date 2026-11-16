@@ -552,6 +552,19 @@ def areas(sroot, names, gmap, texts, ainfo=None):
                       for k, v in zip(wm.children[0::2], wm.children[1::2])
                       if k.value and f32(one(v, 'Saturation')) is not None}
                 if wf: e['workforce_saturation'] = wf
+            fm = one(am, 'AreaFestivalManager')     # festivals: a running one, and each kind's charge meter
+            af = one(fm, 'ActiveFestivalGUID') if fm is not None else None
+            if af is not None and af.value and u(af.value): e['festival_active'] = name(u(af.value))
+            meters = {}
+            for t in ch(one(fm, 'FestivalAttributes'), 't1') if fm is not None else []:
+                at, mx = one(one(t, 'AttributeType'), 'id'), f32(one(t, 'Max'))
+                if at is not None and at.value and mx: meters[str(u(at.value))] = round((f32(one(t, 'Value')) or 0) / mx, 4)
+            if meters: e['festival_meters'] = meters
+            te = one(one(am, 'AreaEffectManager'), 'TimedEffects')   # temporary effects, e.g. arena events
+            eff = [{'name': name(u(g.value)), 'guid': u(g.value), 'ends_ms': u(end.value) if end is not None and end.value else None}
+                   for t in ch(te, 't1') for g, end in [(one(t, 'Guid'), one(one(t, 'EndTimestamp'), 'value'))]
+                   if g is not None and g.value]
+            if eff: e['timed_effects'] = eff
             objs = area_objects(am)
             ps = [p for p in (unpack(one(ob, 'Position'), '<fff') for ob in objs) if p]
             e.update(economy(objs, name, ainfo or {}))
@@ -786,6 +799,77 @@ def force_cells(p, old):
     o = [None] * 3 if old is None else forces(old) if old else [0, 0, 0]
     return [cell(v, ov) if v is not None else ('', None) for v, ov in zip(f, o)]
 
+def island_balance(e):
+    """Per good, what comes in and goes out of an island per minute. Production, factory inputs and
+    ship loads/unloads are measured; residents' consumption is what remains (an estimate)."""
+    out = {}
+    def row(g):
+        return out.setdefault(g, {'good': g, 'prod': 0.0, 'cap': 0.0, 'use': 0.0, 'ship_in': 0.0, 'ship_out': 0.0,
+                                  'net': None, 'resid': None, 'makers': []})
+    for p in e.get('production', []):
+        for g, v in (p.get('output_per_minute') or {}).items():
+            r = row(g); r['prod'] += v; r['cap'] += (p.get('capacity_per_minute') or {}).get(g, 0); r['makers'].append(p)
+        for g, v in (p.get('input_per_minute') or {}).items(): row(g)['use'] += v
+    for g, t in (e.get('stock_trends') or {}).items():
+        r, m = row(g), t.get('minutes') or 0
+        r['net'] = t.get('net_per_minute')
+        if m: r['ship_in'], r['ship_out'] = (t.get('unloaded') or 0) / m, (t.get('loaded') or 0) / m
+    for r in out.values():
+        if r['net'] is not None:   # sampling noise can push it below zero
+            r['resid'] = max(0.0, r['prod'] + r['ship_in'] - r['use'] - r['ship_out'] - r['net'])
+    return out
+
+def boost_advice(r, e, elsewhere):
+    """(kind, text) telling where to act on one good of one island, or None. kind: 'fix' (buildings
+    not working fully), 'route' (ships take too much or bring too little), 'build', 'source' (nothing
+    brings it), 'surplus'. `elsewhere`: good -> [(city, net/min)] on the other islands of the province."""
+    g, net = r['good'], r['net']
+    if net is None: return None
+    others = elsewhere.get(g, [])
+    mk = max(r['makers'], key=lambda p: (p.get('output_per_minute') or {}).get(g, 0), default=None)
+    stock = (e.get('storage') or {}).get(g, 0)
+    if net <= -0.1 and stock / -net <= 120:         # a slow fall on a stock that lasts hours is noise
+        d = -net
+        if mk:
+            n, eff = mk['count'] or 1, mk.get('productivity') or 0
+            per100 = (mk.get('capacity_per_minute') or {}).get(g, 0) / n
+            unit = (mk.get('output_per_minute') or {}).get(g, 0) / n or per100
+            if eff < 0.9 and per100 * n * (1 - eff) >= 0.8 * d:
+                why = mk.get('idle_reasons') or {}
+                full = mk.get('idle_output_full', 0)
+                if full and full * 2 >= sum(why.values()):    # stopped with the output full, yet the stock falls
+                    return 'fix', (f"{full} {mk['building']} stopped with the output full while the warehouse "
+                                   'empties: carts do not collect it, put a warehouse nearer or check the roads')
+                why = ', '.join(f'{k} ×{v}' for k, v in why.items())
+                return 'fix', (f"{n} {mk['building']} at {eff:.0%}: get them working before building more"
+                               + (f' ({why})' if why else ''))
+            more = math.ceil(d / unit) if unit else 1
+            build = f"build {more} more {mk['building']} (+{more * unit:.1f}/min)"
+            if r['ship_out'] >= d:
+                dst = ', '.join((e.get('supplies') or {}).get(g, [])) or 'other islands'
+                return 'route', f"ships take {r['ship_out']:.1f}/min to {dst}: lower that by {d:.1f}/min, or {build}"
+            return 'build', build
+        src = (e.get('receives') or {}).get(g)
+        spare = ', '.join(f'{c} (+{v:.1f}/min)' for c, v in sorted(others, key=lambda x: -x[1]) if v >= 0.1)
+        if src:
+            return 'route', (f"arrives from {', '.join(src)}: raise that route by {d:.1f}/min"
+                             + (f'; spare also at {spare}' if spare else ''))
+        return 'source', (f'nothing brings it: add a route from {spare}' if spare else
+                          'nothing brings it and no island of this province has spare: build production or import it')
+    full = sum(p.get('idle_output_full', 0) for p in r['makers'])
+    if mk and net > -0.1 and (full or net >= 0.1):
+        need = ', '.join(f'{c} ({v:.1f}/min)' for c, v in sorted(others, key=lambda x: x[1]) if v <= -0.2)
+        if need: return 'surplus', f'spare output: ship it to {need}'
+        if full >= 3: return 'surplus', f"{full} {mk['building']} idle with the output full: pause them or ship it out"
+    return None
+
+BOOST_KINDS = (('fix', 'Get buildings working'), ('route', 'Change a trade route'), ('build', 'Build more'),
+               ('source', 'Nothing brings it'), ('surplus', 'Spare output'))
+
+def boost_order(b):
+    """Worst first: the fastest fall; for spare output, a match with an island in need first."""
+    return (not b['text'].startswith('spare output'), -b['net']) if b['kind'] == 'surplus' else (b['net'],)
+
 def island_views(cur, prev, humans, alarms):
     """One panel per island of the human players: what is short, what the residents ask for, what is
     overproduced, what is shipped out and brought in. Built from the same data as the alarms."""
@@ -796,7 +880,9 @@ def island_views(cur, prev, humans, alarms):
     out = []
     for r in cur:
         label = r['session']
-        for e in sorted((e for e in r['areas'] if e.get('owner') in humans), key=lambda e: -(e.get('population') or 0)):
+        mine = [e for e in r['areas'] if e.get('owner') in humans]
+        bal = {e['area']: island_balance(e) for e in mine}
+        for e in sorted(mine, key=lambda e: -(e.get('population') or 0)):
             place, pe = f'{city_of(e)} ({label})', old.get((label, e['area'])) or {}
             st, tr, made = e.get('storage') or {}, e.get('stock_trends') or {}, e.get('output_capacity') or {}
             lims, ost = e.get('storage_limits_estimate') or [], pe.get('storage') or {}
@@ -808,10 +894,38 @@ def island_views(cur, prev, humans, alarms):
             facts = [x for x in (e.get('city_status'),
                                  f"{e['population']:,} residents" if e.get('population') else None,
                                  f"income {e['income_per_minute']:,}/min" if e.get('income_per_minute') is not None else None,
-                                 f"workforce {min(wf.values()):.0%}" if wf else None) if x]
+                                 f"workforce {min(wf.values()):.0%}" if wf else None,
+                                 f"running now: {event_now(e)}" if event_now(e) else None) if x]
             if e.get('residents'):
                 facts.append(', '.join(f'{k} {v:,}' for k, v in e['residents'].items()))
-            tables = []
+            tables, boost = [], []
+            # balance per good, and what to do where it does not add up
+            elsewhere = collections.defaultdict(list)
+            for o in mine:
+                if o['area'] == e['area']: continue
+                for g, x in bal[o['area']].items():
+                    if x['net'] is not None: elsewhere[g].append((city_of(o), x['net']))
+            rows = []
+            for x in bal[e['area']].values():
+                adv = boost_advice(x, e, elsewhere)
+                if adv:
+                    boost.append({'kind': adv[0], 'text': adv[1], 'good': x['good'], 'net': x['net'],
+                                  'stock': st.get(x['good'], 0), 'place': place, 'island': f"{label}-{e['area']}",
+                                  'prov': label})
+                if x['net'] is None or (not adv and abs(x['net']) < 0.1 and not x['prod']): continue
+                n = sum(p['count'] for p in x['makers'])
+                z = lambda v: cell(v or None, nd=2)      # blank instead of 0.00 keeps the table readable
+                rows.append([x['good'], z(x['prod']), (str(n), n) if n else ('', None), z(x['ship_in']),
+                             z(x['use']), z(x['ship_out']), z(x['resid']),
+                             cell(x['net'], nd=2), adv[1] if adv else ''])
+            if rows:
+                rows.sort(key=lambda x: (not x[-1], x[7][1]))
+                tables.append({'title': 'Balance: where to boost', 'rows': rows,
+                               'headers': ['Good', 'Made/min', 'Buildings', 'Ships bring', 'Factories use', 'Ships take',
+                                           'Residents (est.)', 'Net/min', 'What to do'],
+                               'note': 'Per minute, over the last 20 minutes. Production, factory inputs and ship '
+                                       'loads are measured; residents\' consumption is the remainder, an estimate. '
+                                       '"Build N more" uses the output of one building as it works now.'})
             # residents' needs: is each good stocked, made here or brought in; is each service built
             rows = []
             for g, nd in sorted((e.get('needs') or {}).items(), key=lambda kv: (kv[1].get('kind') != 'good',
@@ -860,8 +974,27 @@ def island_views(cur, prev, humans, alarms):
                 if rows:
                     tables.append({'title': title, 'rows': rows, 'headers': ['Good', 'State', 'Stock', 'Trend/min', who]})
             out.append({'id': f"{label}-{e['area']}", 'label': place, 'prov': label, 'facts': facts,
-                        'alarms': by_place.get(place, []), 'tables': tables})
+                        'alarms': by_place.get(place, []), 'tables': tables, 'boost': boost})
     return out
+
+def event_over(pe, e):
+    """What boosted an island at the previous save and is over now, or None: a festival that was
+    running, a timed effect (arena games, decisions) that has ended, or a festival meter that was
+    empty then and is charging again (a festival was held just before that save)."""
+    if pe.get('festival_active') and pe['festival_active'] != e.get('festival_active'):
+        return f"the festival ({pe['festival_active']})"
+    now = {x['guid'] for x in e.get('timed_effects') or []}
+    gone = [x['name'] for x in pe.get('timed_effects') or [] if x['guid'] not in now]
+    if gone: return f'the event {gone[0]}'
+    m0, m1 = pe.get('festival_meters') or {}, e.get('festival_meters') or {}
+    if any(v <= 0.01 and m1.get(k, 0) > v for k, v in m0.items()): return 'a festival'
+    return None
+
+def event_now(e):
+    """A festival or timed effect running on the island now (good or bad; it will end)."""
+    x = ([f"festival {e['festival_active']}"] if e.get('festival_active') else []) + \
+        [f"event {t['name']}" for t in e.get('timed_effects') or []]
+    return ', '.join(dict.fromkeys(x))
 
 def report_data(cur, prev, humans, horizon=60, _inner=False):
     """Alarms and tables of the report, as plain data (rendered as Markdown or HTML)."""
@@ -922,13 +1055,16 @@ def report_data(cur, prev, humans, horizon=60, _inner=False):
                     isl('medium', f'{g}: ran out in the last {t["minutes"]:g} min (it was {t["max"]})',
                         'consumed here but not produced: check the routes that should bring it', 'empty')
             if pe:
+                why = event_over(pe, e)     # a festival or event boosted the previous save: the fall is its end
+                after = f' after {why}: temporary' if why else ''
                 p0, p1 = pe.get('population') or 0, e.get('population') or 0
                 if p0 - p1 >= max(50, p0 * 0.02):
-                    isl('high', f'population fell from {p0:,} to {p1:,}', 'look for unmet needs or missing goods above',
-                        'population', d=True)
+                    isl('info' if why else 'high', f'population fell from {p0:,} to {p1:,}{after}',
+                        '' if why else 'look for unmet needs or missing goods above', 'population', d=True)
                 i0, i1 = pe.get('income_per_minute'), e.get('income_per_minute')
                 if i0 and i1 is not None and i0 - i1 > abs(i0) * 0.1:
-                    isl('medium', f'income fell from {i0:,} to {i1:,} per minute', cat='income', d=True)
+                    isl('info' if why else 'medium', f'income fell from {i0:,} to {i1:,} per minute{after}',
+                        cat='income', d=True)
         for e in r['areas']:
             pe = old_area.get(e['area'])
             if pe and is_human(pe.get('owner')) and not is_human(e.get('owner')):
@@ -1106,12 +1242,13 @@ def report_data(cur, prev, humans, horizon=60, _inner=False):
         g['items'].append(x)
     cards = sorted(groups.values(), key=lambda g: (order[g['level']], not any(i.get('new') for i in g['items']),
                                                    -sum(order[i['level']] < 2 for i in g['items'])))
+    islands = [] if _inner else island_views(cur, prev, humans, alarms)
     return {'save': cur[0].get('save'), 'previous': (prev or [{}])[0].get('save'), 'resolved': resolved,
             'horizon': horizon, 'alarms': alarms, 'groups': cards, 'sections': sections, 'drains': sorted(drains, key=lambda d: d['mins']),
             'hostile': sorted({n for r in cur for o, n in [(p['participant'], p['name']) for p in r['participants']]
                                + [(e.get('owner'), e.get('owner_name')) for e in r['areas']]
                                if n and kinds.get(str(o)) == 'pirate'}),   # a pirate may only own an island
-            'islands': [] if _inner else island_views(cur, prev, humans, alarms)}
+            'islands': islands, 'boost': [b for i in islands for b in i['boost']]}
 
 def hints(card, seen=None):
     """(alarm, hint, repeated): a hint is written out the first time it appears (in the card, or in
@@ -1138,6 +1275,10 @@ def render_md(rep):
         out += [f"- **{a['level']}**{' **NEW**' if a.get('new') else ''} {a['text']}" + (f" → *{hint}*" if hint and not again else '')
                 for a, hint, again in hints(g)]
         out.append('')
+    if rep.get('boost'): out += ['## Where to boost', '']
+    for kind, title in BOOST_KINDS:
+        bs = sorted((b for b in rep.get('boost', []) if b['kind'] == kind), key=boost_order)
+        if bs: out += [f'**{title}**', ''] + [f"- {b['good']} at {b['place']} ({b['net']:+.1f}/min): {b['text']}" for b in bs] + ['']
     if rep.get('islands'): out += ['## Islands', '']
     for isl in rep.get('islands', []):
         out += [f"### {isl['label']}", '', ' · '.join(isl['facts']), '']
@@ -1253,6 +1394,11 @@ ul.list>li[data-level=high]::before{background:var(--high)}ul.list>li[data-level
 .sub{display:block;font-size:12px;color:var(--ink-2)}
 .gt{font:600 11px/1 var(--text);letter-spacing:.08em;text-transform:uppercase;color:var(--ink-3);margin:18px 0 8px}
 .group:first-child .gt{margin-top:0}
+.boost{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(380px,100%),1fr));gap:14px;align-items:start}
+.boost .gt{margin-top:0}.boost li[data-kind=fix]::before,.boost li[data-kind=source]::before{background:var(--high)}
+.boost li[data-kind=route]::before,.boost li[data-kind=build]::before{background:var(--medium)}
+.boost li[data-kind=surplus]::before{background:var(--new)}.rate{font-size:12px;margin-left:6px;font-weight:600}
+.boost details>summary{cursor:pointer;color:var(--ink-2);font-size:13px;padding:8px 0 0}.boost details ul{margin-top:8px}
 .tablets{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(270px,100%),1fr));gap:14px}
 .tablet{padding:16px 18px;display:grid;gap:12px;align-content:start}
 .tablet h3{font:18px/1 var(--display);font-variant:small-caps;letter-spacing:.06em;margin:0;display:flex;
@@ -1308,6 +1454,7 @@ function apply(){
     if(ok&&l!=='minor')n[l]++;r.hidden=!(ok&&!hidden.has(l))});
   $$('[data-prov]:not(button):not(.item):not(.row)').forEach(el=>el.hidden=!inProv(el));
   $$('.group').forEach(g=>g.hidden=!g.querySelector('.item:not([hidden])'));
+  $$('.bgroup').forEach(g=>g.hidden=!g.querySelector('li:not([hidden])'));
   const mi=$('#minor');if(mi){const k=mi.querySelectorAll('.row:not([hidden])').length;mi.hidden=!k;
     mi.querySelector('summary').textContent=k+' slow '+(k===1?'drain':'drains')+': small stock, under the alarm threshold'}
   const e1=$('#dry-none');if(e1)e1.hidden=!!$('#dry .row:not([hidden]),#dry .item:not([hidden])');
@@ -1567,6 +1714,23 @@ def render_html(rep, images, stamp=None):
         out.append(f'<div class="group"><p class="gt">{h(title)}</p><ul class="list">{"".join(lis)}</ul></div>')
     out.append('<p class="muted" id="hand-none" hidden>Nothing else with the current filters. '
                'Info-level alarms are off by default: press <kbd>3</kbd>.</p></section></div>')
+
+    # ---- where to boost
+    if rep.get('boost'):
+        out.append('<section id="boost"><div class="head"><h2>Where to boost</h2><p>Per island and good: production, '
+                   'factory inputs and ship loads against what is used, over the last 20 minutes. Open an island for '
+                   'its full balance.</p></div><div class="boost">')
+        for kind, title in BOOST_KINDS:
+            bs = sorted((b for b in rep['boost'] if b['kind'] == kind), key=boost_order)
+            if not bs: continue
+            lis = [f'<li data-prov="{h(b["prov"])}" data-kind="{kind}"><span><b>{h(b["good"])}</b> · {place(b["place"])} '
+                   f'<span class="rate {"dn" if b["net"] < 0 else "up"}">{b["net"]:+.1f}/min</span>'
+                   f'<span class="sub">{h(b["text"])}</span></span></li>' for b in bs]
+            more = (f'<details><summary>{len(lis) - 6} more</summary><ul class="list">{"".join(lis[6:])}</ul></details>'
+                    if len(lis) > 6 else '')
+            out.append(f'<div class="panel bgroup" data-kind="{kind}"><p class="gt">{h(title)} ({len(lis)})</p>'
+                       f'<ul class="list">{"".join(lis[:6])}</ul>{more}</div>')
+        out.append('</div></section>')
 
     # ---- provinces
     tabs = []

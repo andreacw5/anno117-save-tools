@@ -760,6 +760,38 @@ class TestReport(TempDirMixin, unittest.TestCase):
             self.assertIn(needle, page)
         self.assertIn('data-theme="dark"', page)
 
+    def test_event_over(self):
+        self.assertIsNone(A.event_over({'festival_meters': {'3': 0.4}}, {'festival_meters': {'3': 0.45}}))
+        self.assertEqual(A.event_over({'festival_meters': {'7': 0.0}}, {'festival_meters': {'7': 0.03}}), 'a festival')
+        self.assertIsNone(A.event_over({'festival_meters': {'6': 0.0}}, {'festival_meters': {'6': 0.0}}))  # never charged
+        self.assertEqual(A.event_over({'timed_effects': [{'guid': 9, 'name': 'Games'}]}, {}), 'the event Games')
+        s, p = self.session(pop=900), self.session(pop=1000)
+        p['areas'][0]['festival_active'] = 'Feast'
+        rep = A.report_data([s], [p], {41})
+        pop = [a for a in rep['alarms'] if a['cat'] == 'population'][0]
+        self.assertEqual((pop['level'], pop['text']), ('info', 'population fell from 1,000 to 900 after the festival (Feast): temporary'))
+
+    def test_boost_advice(self):
+        t = lambda net, loaded=0: {'net_per_minute': net, 'outflow_per_minute': 1.0, 'inflow_per_minute': 0.0,
+                                   'max': 30, 'minutes': 20, 'loaded': loaded, 'unloaded': 0}
+        bakery = {'building': 'Bakery', 'count': 2, 'productivity': 1.0, 'output_per_minute': {'Bread': 1.0},
+                  'capacity_per_minute': {'Bread': 1.0}}
+        e = {'production': [bakery], 'stock_trends': {'Bread': t(-1.5)}, 'supplies': {}, 'receives': {}}
+        b = A.island_balance(e)['Bread']
+        self.assertEqual(round(b['resid'], 2), 2.5)                      # 1.0 made + 1.5 drawn from stock
+        self.assertEqual(A.boost_advice(b, e, {}), ('build', 'build 3 more Bakery (+1.5/min)'))
+        e['stock_trends']['Bread'] = t(-1.5, loaded=40)                  # ships take 2/min: the route is the cause
+        e['supplies'] = {'Bread': ['Capua']}
+        self.assertEqual(A.boost_advice(A.island_balance(e)['Bread'], e, {})[0], 'route')
+        e['production'] = [dict(bakery, productivity=0.25, output_per_minute={'Bread': 0.25})]
+        e['stock_trends']['Bread'] = t(-0.6)                             # running at 100% would cover it
+        self.assertEqual(A.boost_advice(A.island_balance(e)['Bread'], e, {})[0], 'fix')
+        e['storage'] = {'Bread': 400}                                    # lasts 11 hours: no advice
+        self.assertIsNone(A.boost_advice(A.island_balance(e)['Bread'], e, {}))
+        e = {'production': [], 'stock_trends': {'Fish': t(-0.5)}, 'receives': {}}
+        self.assertEqual(A.boost_advice(A.island_balance(e)['Fish'], e, {'Fish': [('Ostia', 0.8)]}),
+                         ('source', 'nothing brings it: add a route from Ostia (+0.8/min)'))
+
     def test_running_dry_and_pirates(self):
         s = self.session()
         s['participants'].append({'participant': 60, 'name': 'Raiders', 'warships': 4, 'civil_ships': 0, 'troops': 0,
