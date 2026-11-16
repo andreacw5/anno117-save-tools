@@ -145,6 +145,8 @@ stores it as `factory` and `extract` computes, per area:
   icons the game shows over them (`Infolayer/Icons/t1/GUID`, template `InfoLayerIcon`), such as
   "StorageFull" (nobody collects the output), "missing goods", a paused building or, on the Nile,
   the flood and harvest seasons;
+- `idle_output_full` (per area): how many idle buildings carry the StorageFull icon (GUID 2001976),
+  i.e. overproduction; `idle_other_reasons`: the idle buildings without it, by icons;
 - `workforce_saturation`: `AreaWorkforceManager/DeltaStorage`, per workforce type the share of
   demand that is met (1.0 = every building has its workers);
 - `goods_per_minute`: production minus factory consumption. Residents' consumption and trade
@@ -159,6 +161,28 @@ is stored as the number of GUIDs skipped since the previous (`next = previous + 
 Example, `2085 16 0 149600 | 23 21 25 19`: charcoal (2085) 23, mud (2102) 21, reed (2103) 25,
 mud bricks (151704) 19. Goods with amount 0 can be listed. `extract` writes the non-zero ones as
 `storage` (names) and `storage_guids`. `AreaEconomy/TradeStorage/StrgLrg` uses the same layout.
+
+### Warehouse history (`StorageTrends`)
+
+`AreaEconomy/StorageTrends` holds the data of the game's warehouse chart: pairs of a good GUID and
+a record with `Points` (`capacity` and `size` = 120, then 120 `uint32` stock samples, oldest
+first, the last one equal to the current stock), `LastPointTime` (game time in ms) and
+`Estimation` (0 in every save seen). Samples are **10 game seconds** apart, so a save holds the
+last 20 minutes: two saves 180 s apart had `LastPointTime` 180000 ms apart and series shifted by
+18 samples. `extract` writes, per good, `stock_trends`: `outflow_per_minute` and
+`inflow_per_minute` (sum of the falls and of the rises between samples: consumption and ships
+loading, production and ships unloading), `net_per_minute` (last minus first sample, per minute)
+and `max` (the highest sample).
+
+Storage limits are not stored, and they differ between goods of one area (for example 450 for
+most goods and 1950 for some raw materials). Goods held at a limit all peak at the same value, so
+`storage_limits_estimate` lists every peak shared by at least two goods; a good is "at limit" when
+its peak is one of them and the stock is within 2% of it.
+
+### Game time
+
+`GameSessionManager/SessionTotalTime` (per province, ms of game time) is written by `extract` as
+`session_time_ms`; the difference between two saves is the game time that passed between them.
 
 ### City names
 
@@ -189,7 +213,9 @@ Each house type lists its needs in `assets.xml` under `Values/Residence7/NeedsLi
 unit of `NeedConsumptionRate` is not confirmed: read as "per resident per minute" it gives about 5×
 what the game's own production and full warehouses suggest, and Anno 117's optional needs (one
 good *or* another satisfies the same need) split consumption between goods. Until this is
-verified, `extract` does not include residents in `goods_per_minute`.
+verified, `extract` does not include residents in `goods_per_minute`. The warehouse history
+(`stock_trends.outflow_per_minute`) measures what actually leaves a warehouse, residents included,
+but mixed with factories and ships loading.
 
 ## 6. Trade routes
 

@@ -8,3 +8,5 @@ guid_names.json
 __pycache__/
 *.pyc
 *_map.png
+report.html
+report.md

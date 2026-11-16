@@ -552,6 +552,120 @@ class TestEconomyStatus(unittest.TestCase):
         self.assertEqual(row['idle_reasons'], {'StorageFull': 2, '(no icon)': 1})
         self.assertEqual(res['idle_reasons'], {'StorageFull': 2, '(no icon)': 1})
         self.assertEqual(res['output_capacity'], {'9': 4.0})   # every farm at 100%
+        self.assertNotIn('idle_output_full', res)               # 7 is not the StorageFull icon
+        self.assertEqual(res['idle_other_reasons'], {'StorageFull': 2, '(no icon)': 1})
+
+    def test_storage_full_icon_is_counted_apart(self):
+        f32 = lambda v: struct.pack('<f', v)
+        def building(icons):
+            return self.node('t1', None, [
+                self.node('guid', struct.pack('<I', 500)), self.node('Building'),
+                self.node('Factory7', None, [self.node('CurrentProductivity', f32(0.0))]),
+                self.node('Infolayer', None, [self.node('Icons', None, [
+                    self.node('t1', None, [self.node('GUID', struct.pack('<I', i))]) for i in icons])])])
+        full = A.ICON_STORAGE_FULL
+        res = A.economy([building([full]), building([full, 8]), building([8])], str, {})
+        self.assertEqual(res['idle_output_full'], 2)
+        self.assertEqual(res['idle_other_reasons'], {'8': 1})
+
+
+class TestStockTrends(unittest.TestCase):
+    def trends(self, series):
+        n = lambda name, value=None, kids=(): setattr(x := A.Node(name, value), 'children', list(kids)) or x
+        kids = []
+        for g, pts in series.items():
+            kids.append(n('a8000', struct.pack('<I', g)))
+            kids.append(n('t1', None, [n('Points', None, [n('capacity', struct.pack('<Q', 120))]
+                                         + [n('a8000', struct.pack('<I', p)) for p in pts])]))
+        return A.stock_history(n('StorageTrends', None, kids))
+
+    def test_slope_flows_and_peak(self):
+        # 13 samples = 2 minutes; falls by 1 every sample except one delivery of +10
+        pts = [100 - i for i in range(13)]
+        pts[6:] = [p + 10 for p in pts[6:]]
+        t = self.trends({5: pts, 6: [0] * 13})
+        self.assertNotIn(6, t)                                  # never stocked: skipped
+        self.assertEqual(t[5]['minutes'], 2.0)
+        self.assertEqual(t[5]['outflow_per_minute'], 5.5)       # 11 units fell in 2 minutes
+        self.assertEqual(t[5]['inflow_per_minute'], 4.5)        # one rise of 9 (10 - 1)
+        self.assertEqual(t[5]['max'], 104)                      # 94 + the delivery
+        self.assertEqual(t[5]['net_per_minute'], -1.0)          # 100 -> 98 in 2 minutes
+
+    def test_storage_limits(self):
+        self.assertEqual(A.storage_limits([450, 450, 1950, 1950, 300, 25, 25, 10, 10]), [25, 450, 1950])
+        self.assertEqual(A.storage_limits([450, 300]), [])
+        self.assertTrue(A.at_limit(445, {'max': 450}, [450]))
+        self.assertFalse(A.at_limit(300, {'max': 450}, [450]))
+        self.assertFalse(A.at_limit(300, {'max': 300}, [450]))  # its peak is not a shared limit
+
+
+class TestReport(TempDirMixin, unittest.TestCase):
+    def session(self, pop=1000, stock=10, ships=3, owner=41):
+        trend = {'net_per_minute': -1.0, 'outflow_per_minute': 1.0, 'inflow_per_minute': 0.0, 'max': 30, 'minutes': 20}
+        full = {'net_per_minute': 0.0, 'outflow_per_minute': 1.0, 'inflow_per_minute': 1.0, 'max': 450, 'minutes': 20}
+        return {'session': 'latium', 'save': 's.a8s', 'session_time_ms': 600000, 'human_players': [41],
+                'participants': [{'participant': 41, 'name': 'Me', 'ship_count': ships, 'units': [],
+                                  'ships': [{'type': 'Trireme', 'guid': 1, 'count': ships}]}],
+                'areas': [{'area': 7, 'owner': owner, 'owner_name': 'Me', 'city': 'Roma', 'population': pop,
+                           'income_per_minute': 100, 'workforce_saturation': {'Plebs': 0.5},
+                           'production': [{'count': 4}], 'idle_output_full': 2, 'idle_other_reasons': {'Missing': 3},
+                           'storage': {'Bread': stock, 'Wine': 449, 'Oil': 450}, 'output_capacity': {},
+                           'stock_trends': {'Bread': trend, 'Wine': full, 'Oil': full},
+                           'storage_limits_estimate': [450], 'receives': {'Wine': ['Ostia']}},
+                          {'area': 8, 'owner': 41, 'owner_name': 'Me', 'city': 'Ostia', 'output_capacity': {'Wine': 2.0}}],
+                'trade_routes': [{'id': 1, 'name': 'Empty', 'owner': 41, 'ships': [], 'stations': [
+                    {'area': 7, 'session': 'latium', 'city': 'Roma', 'goods': {'Fish': 0}}]},
+                                 {'id': 2, 'name': 'Wine Ost - Rom', 'owner': 41, 'ships': [5], 'stations': [
+                    {'area': 8, 'session': 'latium', 'city': 'Ostia', 'goods': {'Wine': 0}},
+                    {'area': 7, 'session': 'latium', 'city': 'Roma', 'goods': {'Wine': 0}}]}]}
+
+    def test_alarms(self):
+        rep = A.report_data([self.session()], [self.session(pop=2000, ships=5)], {41})
+        text = '\n'.join(f"{a['level']} {a['place']}: {a['text']}" for a in rep['alarms'])
+        self.assertIn('high Roma (latium): Bread: 10 left', text)        # 10 min < horizon / 3
+        self.assertIn('Plebs: only 50%', text)
+        self.assertIn('overproduction: 2 of 4 production buildings idle', text)
+        self.assertIn('3 production buildings stopped: Missing ×3', text)
+        self.assertIn('info Wine Ost - Rom: Wine → Roma (449): destination already at its storage limit', text)
+        self.assertIn('population fell from 2,000 to 1,000', text)
+        self.assertIn('no ships assigned', text)
+        self.assertIn('none of its goods (Fish)', text)
+        self.assertIn('2 ships fewer', text)
+        self.assertEqual([a['level'] for a in rep['alarms']], sorted((a['level'] for a in rep['alarms']),
+                         key=['high', 'medium', 'info'].index))
+        self.assertEqual(rep['sections'][0]['elapsed_min'], 0)
+        cards = {(g['kind'], g['place']): g for g in rep['groups']}
+        self.assertEqual(cards[('route', 'Empty')]['detail'], 'Roma · 0 ships')
+        self.assertEqual(cards[('island', 'Roma (latium)')]['level'], 'high')
+        self.assertIn('nothing brings it here', cards[('island', 'Roma (latium)')]['items'][0]['hint'])
+        self.assertEqual(rep['groups'][0]['level'], 'high')
+
+    def test_lost_island_and_no_previous(self):
+        rep = A.report_data([self.session(owner=99)], [self.session()], {41})
+        self.assertTrue(any('lost' in a['text'] for a in rep['alarms']))
+        rep = A.report_data([self.session()], None, {41})
+        self.assertFalse(any('fell' in a['text'] or 'fewer' in a['text'] for a in rep['alarms']))
+
+    def test_renderers(self):
+        rep = A.report_data([self.session()], [self.session(pop=900)], {41})
+        md = A.render_md(rep)
+        self.assertIn('| Roma |', md)
+        self.assertIn('1,000 (+100)', md)
+        page = A.render_html(rep, {})
+        self.assertTrue(page.startswith('<!doctype html>'))
+        self.assertIn('data-v="1000"', page)
+        self.assertNotIn('http', page.split('<footer')[0].replace('http-equiv', ''))  # nothing loaded from outside
+
+    def test_report_command_on_extract_folder(self):
+        d = os.path.join(self.tmp, 'json')
+        os.makedirs(d)
+        A.write_json(os.path.join(d, 'latium.json'), self.session(), 2)
+        out = os.path.join(self.tmp, 'r.html')
+        args = A.argparse.Namespace(current=d, compare=d, output=out, md=out + '.md', maps=None, player=None,
+                                    horizon=60, names=None, texts=None, city_names=None, radius=40)
+        with quiet(): A.cmd_report(args)
+        self.assertTrue(os.path.getsize(out) > 1000)
+        with open(out + '.md', encoding='utf-8') as f: self.assertIn('Compared with', f.read())
 
 
 if __name__ == '__main__':
