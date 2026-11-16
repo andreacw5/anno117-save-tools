@@ -243,7 +243,12 @@ A ship's default name is `Nameable/VehicleTextGuid` (see above); land units have
 writes each ship's and unit's `meta_id`, so you can name them yourself with `--unit-names FILE`
 (alias `--ship-names`), a JSON object `{"<MetaID>": "name"}`; keys starting with `_` are ignored.
 The name is added as `custom_name` to fleet ships, trade route ships and land units (listed one by
-one under each unit type's `units`). Each land unit is one troop, not an army. A ship keeps its MetaID
+one under each unit type's `units`). Each land unit is one troop, not an army.
+
+An encamped land unit (half upkeep; it leaves its group) has
+`Unit/MirroredUnitState/SerializableUnitState/DispositionState/value/id` = 2, a unit in the field 0.
+`extract` writes it as `camped` on each unit. Confirmed in game on 4 units waiting to embark and on
+pirate raiders (0) against encamped units (2); one unit went from 0 to 2 between two saves. A ship keeps its MetaID
 across saves, also when it sails to another province (74 ships compared over four consecutive saves).
 
 ### Residents' consumption (not computed)

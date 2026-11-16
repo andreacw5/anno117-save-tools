@@ -236,6 +236,13 @@ def ship_name(ob, texts):
     n = u(i.value) if i is not None else 1
     return (f'{t} {roman(n)}' if n > 1 else t) if t else None
 
+def camped(ob):
+    """True when a land unit is encamped (half upkeep, it leaves its group): Unit/MirroredUnitState/
+    SerializableUnitState/DispositionState/value/id is 2; 0 for units in the field. None if absent."""
+    d = one(one(one(one(one(one(ob, 'Unit'), 'MirroredUnitState'), 'SerializableUnitState'),
+                    'DispositionState'), 'value'), 'id')
+    return None if d is None or not d.value else u(d.value) == 2
+
 def area_managers(sroot):
     return getattr(one(one(sroot, 'GameSessionManager'), 'AreaManagers'), 'children', [])
 
@@ -295,8 +302,10 @@ def session(sroot, owners, names, gmap, radius, texts=None, info=None):
         elif one(ob, 'Unit') is not None:
             units[owner][g] += 1
             nm = ship_name(ob, texts or {})                            # land units use the same Nameable
+            cp = camped(ob)
             unit_list[owner][g].append({**({'meta_id': u(mid.value)} if mid is not None else {}),
                                         **({'name': nm} if nm else {}),
+                                        **({'camped': cp} if cp is not None else {}),
                                         'position': [round(pos[0]), round(pos[2])]})
     parts = []
     for owner in sorted(set(ships) | set(units), key=lambda x: (x is None, x or 0)):
@@ -1086,10 +1095,11 @@ def army_view(cur, humans, kinds):
             fleet.append({'title': 'Pirate warships', 'headers': ['Where', 'Ships', 'Ship types'],
                           'rows': [[where(g['position']), n(len(g['items'])), comp(g['items'])] for g in group_at(pwar)]})
         army = []
+        n_camped = lambda items: sum(bool(x.get('camped')) for x in items)
         if troops:
-            army.append({'title': 'Your troops', 'headers': ['Where', 'Units', 'Unit types', 'Names'],
-                         'rows': [[where(g['position']), n(len(g['items'])), comp(g['items']), names(g['items'])]
-                                  for g in group_at(troops)]})
+            army.append({'title': 'Your troops', 'headers': ['Where', 'Units', 'Camped', 'Unit types', 'Names'],
+                         'rows': [[where(g['position']), n(len(g['items'])), n(n_camped(g['items'])), comp(g['items']),
+                                   names(g['items'])] for g in group_at(troops)]})
         if ptroops:
             army.append({'title': 'Pirate troops', 'headers': ['Where', 'Units', 'Unit types'],
                          'rows': [[where(g['position']), n(len(g['items'])), comp(g['items'])] for g in group_at(ptroops)]})
@@ -1100,7 +1110,8 @@ def army_view(cur, humans, kinds):
                     'rivals': rivals, 'spare': spare, 'state': state, 'merchant': len(civil),
                     'on_routes': len(civil) - len(idle) if idle is not None else None,
                     'idle': None if idle is None else len(idle),
-                    'troops': n_troops, 'troop_types': comp(troops), 'troop_groups': len(group_at(troops)),
+                    'troops': n_troops, 'troop_types': comp(troops),
+                    'camped': n_camped(troops) if any('camped' in x for x in troops) else None, 'troop_groups': len(group_at(troops)),
                     'pirate_troops': len(ptroops), 'fleet': fleet, 'army': army})
     return out
 
@@ -1792,10 +1803,14 @@ def render_html(rep, images, stamp=None):
         panel('troops', 'Troops', 'Land units in every province, by place: nearest island and map coordinates. '
               'Each unit is one troop; an army is the group around a place.',
               {'title': 'Troops by province',
-               'headers': ['Province', 'Your units', 'Groups', 'Pirate units', 'Unit types'],
-               'rows': [[a['title'], num(a['troops']), num(a['troop_groups']), num(a['pirate_troops']), a['troop_types']]
+               'note': 'Camped units cost half their upkeep and leave their group: regroup them before moving.',
+               'headers': ['Province', 'Your units', 'Camped', 'Groups', 'Pirate units', 'Unit types'],
+               'rows': [[a['title'], num(a['troops']), num(a.get('camped')), num(a['troop_groups']), num(a['pirate_troops']),
+                         a['troop_types']]
                         for a in rep['army']]},
-              'army', lambda a: f"{a['troops']} units in {a['troop_groups']} groups · {a['pirate_troops']} pirate units",
+              'army', lambda a: f"{a['troops']} units in {a['troop_groups']} groups"
+                                + (f" · {a['camped']} camped" if a.get('camped') is not None else '')
+                                + f" · {a['pirate_troops']} pirate units",
               'No troops here.')
     out.append('<div id="v-alarms" role="tabpanel" aria-labelledby="tab-alarms">')
 

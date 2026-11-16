@@ -537,6 +537,16 @@ class TestCityNames(TempDirMixin, unittest.TestCase):
         self.assertEqual(a, {'area': 10, 'owner': 41})
 
 
+class TestCamped(unittest.TestCase):
+    def test_disposition_two_is_camped(self):
+        n = lambda name, value=None, kids=(): setattr(x := A.Node(name, value), 'children', list(kids)) or x
+        unit = lambda v: n('o', None, [n('Unit', None, [n('MirroredUnitState', None, [n('SerializableUnitState', None, [
+            n('DispositionState', None, [n('value', None, [n('id', struct.pack('<H', v))])])])])])])
+        self.assertTrue(A.camped(unit(2)))
+        self.assertFalse(A.camped(unit(0)))
+        self.assertIsNone(A.camped(n('o')))
+
+
 class TestRouteFlows(unittest.TestCase):
     def test_supplier_is_the_stop_that_produces_the_good(self):
         # the hub also has a few sheep farms; the farm island has more, all idle at save time
@@ -611,8 +621,8 @@ class TestRouteFlows(unittest.TestCase):
                            {'type': 'Aba', 'ships': [{'meta_id': 4, 'role': 'civil', 'position': [5, 5]},
                                                      {'meta_id': 5, 'role': 'civil', 'position': [6, 6]}]}],
                  'units': [{'type': 'Arcieri', 'troop': True, 'units': [
-                     {'meta_id': 6, 'custom_name': 'XXII Sagittarii I', 'position': [50, 50]},
-                     {'meta_id': 7, 'position': [52, 50]}]}]},
+                     {'meta_id': 6, 'custom_name': 'XXII Sagittarii I', 'position': [50, 50], 'camped': True},
+                     {'meta_id': 7, 'position': [52, 50], 'camped': False}]}]},
                 {'participant': 99, 'warships': 1, 'ships': [{'type': 'Aba', 'ships': [war(8, 500)]}]}],
              'areas': [{'area': 1, 'custom_name': 'Memphis', 'center': [100, 90]}],
              'trade_routes': [{'name': 'Annona Mem - Cin', 'owner': 41, 'ships': [{'meta_id': 4, 'session': 'nile',
@@ -628,7 +638,8 @@ class TestRouteFlows(unittest.TestCase):
         self.assertEqual(fleet['Merchant ships on your trade routes'][0],
                          ['Annona Mem - Cin', ('1', 1), ['1 × Aba'], 'Memphis → Cinis'])
         troops = a['army'][0]['rows']
-        self.assertEqual(troops[0][2:], [['2 × Arcieri'], ['XXII Sagittarii I']])
+        self.assertEqual(troops[0][2:], [('1', 1), ['2 × Arcieri'], ['XXII Sagittarii I']])
+        self.assertEqual(a['camped'], 1)
         r['participants'][1]['ships'][0]['ships'] += [war(9, 500), war(10, 500), war(11, 500)]
         self.assertEqual(A.army_view([r], {41}, {'99': 'pirate'})[0]['state'], 'needs reinforcements')
 
