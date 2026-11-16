@@ -16,7 +16,7 @@ Commands:
         production assets are kept; --all keeps everything.
   map <save.a8s> <maindata> [--session S] [-o FILE] [--color WHO=COLOUR ...] [--legend] [--no-routes]
         PNG map of a province: the game's map tiles placed as in the save's MapTemplate, plus
-        buildings, ships and units coloured by owner, island names with their owner, and the
+        buildings, ships (warships triangles, civil ships circles) and units coloured by owner, island names with their owner, and the
         human players' trade routes as dashed lines.
         Needs Pillow (the only optional dependency).
   report <save.a8s | DIR> [--compare PREVIOUS] [-o FILE.html] [--md FILE.md] [--maps DIR] [--player WHO]
@@ -250,6 +250,10 @@ def session_objects(sroot):
 RE_WEAPON_MODULE = re.compile(r'archer|catapult|scorpion|torcher', re.I)
 RE_MILITARY_SHIP = re.compile(r'military|raider|warship|pirate', re.I)
 
+def ship_modules(smo):
+    """GUIDs of the modules installed on a ship (ShipModuleOwner/InstalledShipModules)."""
+    return sorted(u(m.value) for ism in ch(smo, 'InstalledShipModules') for t in ism.children for m in ch(t, 'ShipModuleGuid'))
+
 def ship_role(g, mods, info, gmap):
     """'war' when the ship carries a weapon module (archers, catapult, scorpion, torchers) or its
     asset is a military one (e.g. 'Egyptian RiverShip Dahabiya Military'); otherwise 'civil'
@@ -280,8 +284,7 @@ def session(sroot, owners, names, gmap, radius, texts=None, info=None):
         pos = unpack(one(ob, 'Position'), '<fff') or (0, 0, 0)
         smo = one(ob, 'ShipModuleOwner')
         if smo is not None:
-            mods = sorted(u(m.value) for ism in ch(smo, 'InstalledShipModules')
-                          for t in ism.children for m in ch(t, 'ShipModuleGuid'))
+            mods = ship_modules(smo)
             nm = ship_name(ob, texts or {})
             ships[owner][g].append({**({'name': nm} if nm else {}), 'role': ship_role(g, mods, info, gmap),
                                     'modules': [name(m) for m in mods],
@@ -1716,7 +1719,11 @@ def cmd_map(a):
             if p is None: continue
             x, _, z = p
             mp = one(ob, 'MetaPersistent'); mid = one(mp, 'MetaID') if mp is not None else None
-            kind = 'ship' if one(ob, 'ShipModuleOwner') is not None else 'unit' if one(ob, 'Unit') is not None else 'building'
+            smo = one(ob, 'ShipModuleOwner')
+            if smo is not None:                                       # warship or civil (cargo, river boat)
+                kind = 'warship' if gn is not None and ship_role(u(gn.value), ship_modules(smo), info, gmap) == 'war' else 'civil'
+            else:
+                kind = 'unit' if one(ob, 'Unit') is not None else 'building'
             objs.append((kind, owners.get(u(mid.value)) if mid is not None else None, aid, x, z))
     area_owner = {e['area']: e['owner'] for e in area_list}
     present = sorted({o for k, o, aid, x, z in objs if o is not None} | {o for o in area_owner.values() if o})
@@ -1777,11 +1784,14 @@ def cmd_map(a):
             w = 3 + min(n, 4)                                          # busier legs are thicker
             dashed(pa, qa, (0, 0, 0), w + 3)
             dashed(pa, qa, color.get(owner, (255, 215, 0)), w)
-    for kind, o, aid, x, z in objs:                                   # ships: triangles, units: squares
+    draw_order = {'civil': 0, 'unit': 1, 'warship': 2}                # warships on top
+    for kind, o, aid, x, z in sorted((ob for ob in objs if ob[0] in draw_order), key=lambda ob: draw_order[ob[0]]):
         c = color.get(o, grey); y = H - z
-        if kind == 'ship':
-            d.polygon([(x, y - 9), (x - 7, y + 6), (x + 7, y + 6)], fill=c, outline=(0, 0, 0))
-        elif kind == 'unit' and o is not None:
+        if kind == 'warship':                                          # triangles
+            d.polygon([(x, y - 10), (x - 8, y + 7), (x + 8, y + 7)], fill=c, outline=(0, 0, 0), width=2)
+        elif kind == 'civil':                                          # small circles
+            d.ellipse((x - 5, y - 5, x + 5, y + 5), fill=c, outline=(0, 0, 0))
+        elif o is not None:                                            # units: squares
             d.rectangle((x - 5, y - 5, x + 5, y + 5), fill=c, outline=(0, 0, 0))
     f, fs = font(max(14, H // 90)), font(max(11, H // 130))
     gap = max(6, H // 200)                                             # space between name and owner
@@ -1801,17 +1811,18 @@ def cmd_map(a):
         rows += [((255, 60, 60), 'pirate structures (x)'), (grey, 'nobody / unknown')]
         lf = font(max(14, H // 100)); lh = lf.size + 8 if hasattr(lf, 'size') else 20
         bx, by = 20, 20
-        bw = max(d.textlength(t, font=lf) for t in [f'{label}: ships = triangles, units = squares'] + [r[1] for r in rows]) + 40
+        head = f'{label}: warships = triangles, civil ships = circles, units = squares'
+        bw = max(d.textlength(t, font=lf) for t in [head] + [r[1] for r in rows]) + 40
         d.rectangle((bx - 10, by - 10, bx + bw, by + lh * (len(rows) + 2)), fill=(0, 0, 0))
-        d.text((bx, by), f'{label}: ships = triangles, units = squares', font=lf, fill=(255, 255, 255))
+        d.text((bx, by), head, font=lf, fill=(255, 255, 255))
         for i, (c, t) in enumerate(rows, 1):
             d.rectangle((bx, by + i * lh + 3, bx + 16, by + i * lh + 19), fill=c)
             d.text((bx + 26, by + i * lh), t, font=lf, fill=(255, 255, 255))
     if a.width and a.width < H: im = im.resize((a.width, a.width), Image.LANCZOS)
     out = a.output or f'{label}_map.png'
     im.save(out)
-    print(f'{label}: {len(tiles)} tiles, {sum(k == "ship" for k, *_ in objs)} ships, '
-          f'{sum(k == "unit" for k, *_ in objs)} units -> {out}')
+    print(f'{label}: {len(tiles)} tiles, {sum(k == "warship" for k, *_ in objs)} warships, '
+          f'{sum(k == "civil" for k, *_ in objs)} civil ships, {sum(k == "unit" for k, *_ in objs)} units -> {out}')
 
 def main():
     ap = argparse.ArgumentParser(description='Anno 117: Pax Romana save game and game data tools.')
