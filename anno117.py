@@ -1017,6 +1017,67 @@ def event_now(e):
         [f"event {t['name']}" for t in e.get('timed_effects') or []]
     return ', '.join(dict.fromkeys(x))
 
+def group_at(items, radius=60):
+    """Items with a `position`, grouped greedily by distance; biggest group first."""
+    gs = []
+    for x in items:
+        for g in gs:
+            if math.dist(g['c'], x['position']) < radius:
+                g['items'].append(x); g['c'] = [sum(c) / len(g['items']) for c in zip(*(i['position'] for i in g['items']))]
+                break
+        else:
+            gs.append({'c': list(x['position']), 'items': [x]})
+    return [{'position': [round(c) for c in g['c']], 'items': g['items']} for g in sorted(gs, key=lambda g: -len(g['items']))]
+
+def army_view(cur, humans, kinds):
+    """Per province: the player's warships, troops and idle civil ships in groups, pirate warships,
+    and a summary row. `spare` is a rule of thumb, not a game value: warships beyond two per pirate
+    warship in that province (all of them when there are no pirate warships)."""
+    label = lambda x: x.get('custom_name') or x.get('name') or ''
+    def comp(items, mods=False):
+        c = collections.Counter(x['type'] + (f" ({', '.join(x['modules'])})" if mods and x.get('modules') else '')
+                                for x in items)
+        return ', '.join(f'{n} × {t}' for t, n in c.most_common())
+    def names(items): return ', '.join(n for n in map(label, items) if n)
+    pos = lambda g: f"{g['position'][0]}, {g['position'][1]}"
+    ships = lambda ps, role: [dict(x, type=t['type']) for p in ps for t in p.get('ships', [])
+                             for x in t.get('ships', []) if isinstance(x, dict) and x.get('role') == role and 'position' in x]
+    out = []
+    for r in cur:
+        mine = [p for p in r['participants'] if p['participant'] in humans]
+        pirates = [p for p in r['participants'] if kinds.get(str(p['participant'])) == 'pirate']
+        war, civil, pwar = ships(mine, 'war'), ships(mine, 'civil'), ships(pirates, 'war')
+        troops = [dict(x, type=t['type']) for p in mine for t in p.get('units', []) if t.get('troop') for x in t.get('units', []) if 'position' in x]
+        n_troops = sum(p.get('troops') or 0 for p in mine)
+        rivals = sum(p.get('warships') or 0 for p in r['participants']
+                     if p['participant'] is not None and p['participant'] not in humans
+                     and kinds.get(str(p['participant'])) not in ('pirate', 'npc'))
+        routed = {x.get('meta_id') for rt in r.get('trade_routes', []) for x in rt.get('ships', []) if isinstance(x, dict)}
+        idle = None if any('meta_id' not in x for x in civil) else [x for x in civil if x['meta_id'] not in routed]
+        spare = max(0, len(war) - 2 * len(pwar))
+        state = ('needs reinforcements' if len(war) < len(pwar) else 'can spare ships' if spare
+                 else 'holding' if war or pwar else '')
+        tables = []
+        if war:
+            tables.append({'title': 'Your warships', 'headers': ['Where', 'Ships', 'Ships and modules', 'Names'],
+                           'rows': [[pos(g), (str(len(g['items'])), len(g['items'])), comp(g['items'], True), names(g['items'])]
+                                    for g in group_at(war)]})
+        if troops:
+            tables.append({'title': 'Your troops', 'headers': ['Where', 'Troops', 'Units', 'Names'],
+                           'rows': [[pos(g), (str(len(g['items'])), len(g['items'])), comp(g['items']), names(g['items'])]
+                                    for g in group_at(troops)]})
+        if idle:
+            tables.append({'title': 'Civil ships on no trade route', 'collapsed': True,
+                           'headers': ['Where', 'Ship', 'Name'],
+                           'rows': [[f"{x['position'][0]}, {x['position'][1]}", x['type'], label(x)] for x in idle]})
+        if pwar:
+            tables.append({'title': 'Pirate warships', 'headers': ['Where', 'Ships', 'Ships'],
+                           'rows': [[pos(g), (str(len(g['items'])), len(g['items'])), comp(g['items'])] for g in group_at(pwar)]})
+        out.append({'id': r['session'], 'title': r['session'].capitalize(), 'warships': len(war), 'pirates': len(pwar),
+                    'rivals': rivals, 'spare': spare, 'troops': n_troops, 'civil': len(civil),
+                    'idle': None if idle is None else len(idle), 'state': state, 'tables': tables})
+    return out
+
 def report_data(cur, prev, humans, horizon=60, _inner=False):
     """Alarms and tables of the report, as plain data (rendered as Markdown or HTML)."""
     prev_s = {r['session']: r for r in prev or []}
@@ -1269,7 +1330,8 @@ def report_data(cur, prev, humans, horizon=60, _inner=False):
             'hostile': sorted({n for r in cur for o, n in [(p['participant'], p['name']) for p in r['participants']]
                                + [(e.get('owner'), e.get('owner_name')) for e in r['areas']]
                                if n and kinds.get(str(o)) == 'pirate'}),   # a pirate may only own an island
-            'islands': islands, 'boost': [b for i in islands for b in i['boost']]}
+            'islands': islands, 'boost': [b for i in islands for b in i['boost']],
+            'army': [] if _inner else army_view(cur, humans, kinds)}
 
 def hints(card, seen=None):
     """(alarm, hint, repeated): a hint is written out the first time it appears (in the card, or in
@@ -1448,7 +1510,7 @@ details.sec .wrapt{background:var(--ground)}details.sec td:first-child,details.s
 details details>summary{cursor:pointer;font-weight:600;padding:6px 0}
 .note{font-size:12px;color:var(--ink-2);margin:4px 0}
 img{max-width:100%;border-radius:6px;border:1px solid var(--rule)}
-.isl h2{margin:4px 0 2px;font-size:24px}.facts{color:var(--ink-2);font-size:13px;margin-bottom:10px}
+.isl h2,.frc h2{margin:4px 0 2px;font-size:24px}.frc{margin-top:22px}.facts{color:var(--ink-2);font-size:13px;margin-bottom:10px}
 .isl ul.list{margin:8px 0 4px}
 footer{color:var(--ink-3);font-size:12px;border-top:1px solid var(--rule);padding-top:14px;display:grid;gap:6px}
 kbd{font:11px var(--text);border:1px solid var(--rule);border-radius:3px;padding:0 4px;color:var(--ink-2)}
@@ -1464,7 +1526,7 @@ const $=s=>document.querySelector(s),$$=s=>[...document.querySelectorAll(s)];
 const R=document.documentElement,B=window.__REPORT,HZ=B.horizon||60;
 R.dataset.theme=S.get('theme',window.matchMedia&&matchMedia('(prefers-color-scheme: light)').matches?'light':'dark');
 let hidden=new Set(S.get('hidden',['info'])),prov=S.get('prov','all'),onlyNew=S.get('onlyNew',false);
-const NB=$('#onlynew'),VI=$('#v-island'),VA=$('#v-alarms'),SEL=$('#isl');
+const NB=$('#onlynew'),VI=$('#v-island'),VA=$('#v-alarms'),VF=$('#v-forces'),SEL=$('#isl');
 // an element with data-prov shows for "all" and for each province it lists; data-prov="all" only for "all"
 const inProv=el=>{const p=el.dataset.prov;return !p||prov==='all'||p.split(' ').includes(prov)};
 function apply(){
@@ -1547,10 +1609,11 @@ function go(d){if(VA.hidden)return;const v=$$('#v-alarms .row,#v-alarms .item').
   focusEl(v[Math.max(0,Math.min(v.length-1,i))])}
 function showIsland(id){if(!SEL)return;if(id&&[...SEL.options].some(o=>o.value===id))SEL.value=id;S.set('island',SEL.value);
   $$('.isl').forEach(x=>x.hidden=x.dataset.id!==SEL.value)}
-function view(v){if(!VI)return;VI.hidden=v!=='island';VA.hidden=v==='island';
+function view(v){if(!VI)return;if(v==='forces'&&!VF)v='alarms';
+  VI.hidden=v!=='island';VA.hidden=v!=='alarms';if(VF)VF.hidden=v!=='forces';
   $$('.seg button').forEach(b=>b.setAttribute('aria-pressed',b.dataset.view===v));
-  $$('button.lvl,button.prov,#onlynew').forEach(b=>b.disabled=v==='island');   // they filter the overview only
-  S.set('view',v);scrollTo(0,0);if(v!=='island')scale()}
+  $$('button.lvl,button.prov,#onlynew').forEach(b=>b.disabled=v!=='alarms');   // they filter the overview only
+  S.set('view',v);scrollTo(0,0);if(v==='alarms')scale()}
 if(SEL){showIsland(S.get('island',SEL.value));SEL.onchange=()=>{showIsland(SEL.value);view('island')};
   $$('.seg button').forEach(b=>b.onclick=()=>view(b.dataset.view));
   $$('button.place[data-island]').forEach(p=>p.onclick=()=>{showIsland(p.dataset.island);view('island')})}
@@ -1558,7 +1621,8 @@ document.addEventListener('keydown',e=>{if(e.ctrlKey||e.metaKey||e.altKey||/inpu
   const k=e.key;if(k==='1')toggle('high');else if(k==='2')toggle('medium');else if(k==='3')toggle('info');else if(k==='n')toggleNew();
   else if(k==='j')go(1);else if(k==='k')go(-1);else if(k==='m')maps();else if(k==='g')scrollTo(0,0);
   else if(k==='t')$('#theme').click();else if(k==='r')location.reload();
-  else if(k==='i'&&VI)view(VI.hidden?'island':'alarms')});
+  else if(k==='i'&&VI)view(VI.hidden?'island':'alarms');
+  else if(k==='f'&&VF)view(VF.hidden?'forces':'alarms')});
 let rz;addEventListener('resize',()=>{clearTimeout(rz);rz=setTimeout(scale,120)});
 try{const y=sessionStorage.getItem('anno117:y');if(y!==null){sessionStorage.removeItem('anno117:y');scrollTo(0,+y)}}catch(e){}
 if(B.stamp){let wait=5000;const poll=()=>{const s=document.createElement('script');
@@ -1575,7 +1639,8 @@ CATEGORIES = (('owner', 'Islands lost or gained'), ('population', 'Population fa
               ('route', 'Trade routes'), ('limit', 'Routes unloading into full warehouses'),
               ('overproduction', 'Overproduction'), ('', 'Other'))
 STATE_CLASS = {'out of stock': 'st-out', 'running low': 'st-low', 'not built': 'st-ns', 'not supplied': 'st-ns',
-               'at limit': 'st-lim', 'missing': 'st-out'}
+               'at limit': 'st-lim', 'missing': 'st-out',
+               'needs reinforcements': 'st-out', 'can spare ships': 'st-lim', 'holding': 'st-ns'}
 
 def render_html(rep, images, stamp=None):
     import base64, html
@@ -1638,7 +1703,9 @@ def render_html(rep, images, stamp=None):
               if prev else '')
            + '</div><span class="grow"></span>'
            + ('<span class="seg" role="group" aria-label="view"><button data-view="alarms" title="overview (i)">overview</button>'
-              '<button data-view="island" title="one island in detail (i)">island</button></span>'
+              '<button data-view="island" title="one island in detail (i)">island</button>'
+              + ('<button data-view="forces" title="ships and troops in every province (f)">forces</button>' if rep.get('army') else '')
+              + '</span>'
               '<select id="isl" aria-label="island">'
               + ''.join(f'<option value="{h(i["id"])}">{h(i["label"])}</option>' for i in rep.get('islands', []))
               + '</select>' if rep.get('islands') else '')
@@ -1658,6 +1725,26 @@ def render_html(rep, images, stamp=None):
                        f'<div class="facts">{h(" · ".join(i["facts"]))}</div>'
                        + (f'<ul class="list">{al}</ul>' if al else '<p class="muted">No alarms on this island.</p>')
                        + ''.join(table(t, count=True) for t in i['tables']) + '</section>')
+        out.append('</div>')
+    # ---- forces view: ships and troops of every province, to see where reinforcements can come from
+    if rep.get('army'):
+        num = lambda v: ('', None) if v is None else (str(v), v)
+        summary = {'title': 'Where to find reinforcements',
+                   'note': 'Spare = your warships beyond two per pirate warship in that province: a rule of thumb, '
+                           'not a game value. Idle civil ships sail on no trade route.',
+                   'headers': ['Province', 'Your warships', 'Pirate warships', 'Rival warships', 'Spare',
+                               'Your troops', 'Idle civil ships', 'State'],
+                   'rows': [[a['title'], num(a['warships']), num(a['pirates']), num(a['rivals']), num(a['spare']),
+                             num(a['troops']), num(a['idle']), a['state']] for a in rep['army']]}
+        out.append('<div id="v-forces" hidden><section><div class="head"><h2>Forces</h2>'
+                   '<p>Your ships and troops in every province, grouped by where they are (map coordinates).</p></div>'
+                   + table(summary) + '</section>')
+        for a in rep['army']:
+            out.append(f'<section class="frc"><h2>{h(a["title"])}</h2>'
+                       f'<div class="facts">{a["warships"]} warships · {a["troops"]} troops · {a["civil"]} civil ships'
+                       f' · {a["pirates"]} pirate warships</div>'
+                       + (''.join(table(t, 'forces-' + a['id'], count=True) for t in a['tables'])
+                          or '<p class="muted">Nothing here.</p>') + '</section>')
         out.append('</div>')
     out.append('<div id="v-alarms">')
 
@@ -1792,7 +1879,7 @@ def render_html(rep, images, stamp=None):
         out.append('</section>')
     out.append('</div>')
     out.append('<footer><span>Keys: <kbd>1</kbd> <kbd>2</kbd> <kbd>3</kbd> levels · ' + ('<kbd>n</kbd> only new · ' if prev else '')
-               + '<kbd>j</kbd>/<kbd>k</kbd> next/previous · <kbd>i</kbd> island view · <kbd>m</kbd> maps · <kbd>g</kbd> top · '
+               + '<kbd>j</kbd>/<kbd>k</kbd> next/previous · <kbd>i</kbd> island view · <kbd>f</kbd> forces · <kbd>m</kbd> maps · <kbd>g</kbd> top · '
                '<kbd>t</kbd> theme · <kbd>r</kbd> reload</span>'
                + (f'<span>Resolved since the previous save: {rep.get("resolved", 0)}.</span>' if prev else '')
                + '<span>Made with anno117.py report. Trends come from the warehouse chart stored in the save (last 20 '

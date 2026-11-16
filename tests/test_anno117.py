@@ -603,6 +603,28 @@ class TestRouteFlows(unittest.TestCase):
         self.assertEqual(A.edge_point(100, 950, 1000), (100, 1000))
         self.assertEqual(A.edge_point(30, 500, 1000), (0, 500))
 
+    def test_army_view_groups_forces_and_finds_spare_ships(self):
+        war = lambda m, x: {'meta_id': m, 'role': 'war', 'modules': ['Remi'], 'position': [x, 100]}
+        r = {'session': 'nile', 'participants': [
+                {'participant': 41, 'troops': 2,
+                 'ships': [{'type': 'Trireme', 'ships': [war(1, 100), war(2, 110), war(3, 900)]},
+                           {'type': 'Aba', 'ships': [{'meta_id': 4, 'role': 'civil', 'position': [5, 5]},
+                                                     {'meta_id': 5, 'role': 'civil', 'position': [6, 6]}]}],
+                 'units': [{'type': 'Arcieri', 'troop': True, 'units': [
+                     {'meta_id': 6, 'custom_name': 'XXII Sagittarii I', 'position': [50, 50]},
+                     {'meta_id': 7, 'position': [52, 50]}]}]},
+                {'participant': 99, 'warships': 1, 'ships': [{'type': 'Aba', 'ships': [war(8, 500)]}]}],
+             'trade_routes': [{'ships': [{'meta_id': 4}]}]}
+        a = A.army_view([r], {41}, {'99': 'pirate'})[0]
+        self.assertEqual((a['warships'], a['pirates'], a['spare'], a['idle'], a['state']),
+                         (3, 1, 1, 1, 'can spare ships'))
+        ships = next(t for t in a['tables'] if t['title'] == 'Your warships')['rows']
+        self.assertEqual([r[1][1] for r in ships], [2, 1])           # two near each other, one apart
+        troops = next(t for t in a['tables'] if t['title'] == 'Your troops')['rows']
+        self.assertEqual(troops[0][2:], ['2 × Arcieri', 'XXII Sagittarii I'])
+        r['participants'][1]['ships'][0]['ships'] += [war(9, 500), war(10, 500), war(11, 500)]
+        self.assertEqual(A.army_view([r], {41}, {'99': 'pirate'})[0]['state'], 'needs reinforcements')
+
     def test_history_records_ship_steps(self):
         n = lambda name, value=None, kids=(): setattr(x := A.Node(name, value), 'children', list(kids)) or x
         pts = [100, 99, 49, 48, 98, 97]               # a ship loads 50, another unloads 50
