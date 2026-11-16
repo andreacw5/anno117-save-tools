@@ -592,11 +592,21 @@ class TestStockTrends(unittest.TestCase):
         self.assertEqual(t[5]['net_per_minute'], -1.0)          # 100 -> 98 in 2 minutes
 
     def test_storage_limits(self):
-        self.assertEqual(A.storage_limits([450, 450, 1950, 1950, 300, 25, 25, 10, 10]), [25, 450, 1950])
-        self.assertEqual(A.storage_limits([450, 300]), [])
+        peaks = [450, 450, 450, 1950, 1950, 1950, 300, 40, 40, 25, 25, 25, 10, 10, 10]
+        self.assertEqual(A.storage_limits(peaks), [25, 450, 1950])     # two goods at 40 are a coincidence
+        self.assertEqual(A.storage_limits([450, 450, 300]), [])
         self.assertTrue(A.at_limit(445, {'max': 450}, [450]))
+        self.assertTrue(A.at_limit(445, {'max': 448}, [450]))           # its own peak need not be exact
         self.assertFalse(A.at_limit(300, {'max': 450}, [450]))
-        self.assertFalse(A.at_limit(300, {'max': 300}, [450]))  # its peak is not a shared limit
+        self.assertFalse(A.at_limit(445, {'max': 1950}, [450, 1950]))   # a 1950 good on its way down
+
+    def test_chart_overrides_storage(self):
+        # StrgLrg reads 0 for goods the warehouse chart shows full: areas() trusts the chart's last sample
+        n = lambda name, value=None, kids=(): setattr(x := A.Node(name, value), 'children', list(kids)) or x
+        tr = n('StorageTrends', None, [n('a8000', struct.pack('<I', 5)), n('t1', None, [n('Points', None,
+               [n('a8000', struct.pack('<I', v)) for v in (749, 750, 749)])])])
+        h = A.stock_history(tr)
+        self.assertEqual((h[5]['first'], h[5]['last']), (749, 749))
 
 
 class TestReport(TempDirMixin, unittest.TestCase):
@@ -604,8 +614,14 @@ class TestReport(TempDirMixin, unittest.TestCase):
         trend = {'net_per_minute': -1.0, 'outflow_per_minute': 1.0, 'inflow_per_minute': 0.0, 'max': 30, 'minutes': 20}
         full = {'net_per_minute': 0.0, 'outflow_per_minute': 1.0, 'inflow_per_minute': 1.0, 'max': 450, 'minutes': 20}
         return {'session': 'latium', 'save': 's.a8s', 'session_time_ms': 600000, 'human_players': [41],
-                'participants': [{'participant': 41, 'name': 'Me', 'ship_count': ships, 'units': [],
-                                  'ships': [{'type': 'Trireme', 'guid': 1, 'count': ships}]}],
+                'participants': [{'participant': 41, 'name': 'Me', 'ship_count': ships + 1,
+                                  'warships': ships, 'civil_ships': 1, 'troops': ships * 2,
+                                  'units': [{'type': 'Legion', 'guid': 3, 'count': ships * 2, 'troop': True},
+                                            {'type': 'Tower', 'guid': 4, 'count': 9}],
+                                  'ships': [{'type': 'Trireme', 'guid': 1, 'count': ships,
+                                             'ships': [{'role': 'war'}] * ships},
+                                            {'type': 'Quinquereme', 'guid': 2, 'count': 1, 'ships': [{'role': 'civil'}]}]},
+                                 {'participant': 50, 'name': None, 'ship_count': 0, 'units': [], 'ships': []}],
                 'areas': [{'area': 7, 'owner': owner, 'owner_name': 'Me', 'city': 'Roma', 'population': pop,
                            'income_per_minute': 100, 'workforce_saturation': {'Plebs': 0.5},
                            'production': [{'count': 4}], 'idle_output_full': 2, 'idle_other_reasons': {'Missing': 3},
@@ -626,14 +642,22 @@ class TestReport(TempDirMixin, unittest.TestCase):
         self.assertIn('Plebs: only 50%', text)
         self.assertIn('overproduction: 2 of 4 production buildings idle', text)
         self.assertIn('3 production buildings stopped: Missing ×3', text)
-        self.assertIn('info Wine Ost - Rom: Wine → Roma (449): destination already at its storage limit', text)
+        self.assertIn('info Wine Ost - Rom: Wine at Roma (449): already at its storage limit', text)
         self.assertIn('population fell from 2,000 to 1,000', text)
         self.assertIn('no ships assigned', text)
         self.assertIn('none of its goods (Fish)', text)
-        self.assertIn('2 ships fewer', text)
+        self.assertIn('2 warships fewer than in the previous save (5 → 3)', text)
+        self.assertIn('4 troops fewer', text)
+        self.assertNotIn('civil ships fewer', text)
+        forces = rep['sections'][0]
+        self.assertEqual(forces['id'], 'forces')
+        self.assertEqual(forces['tables'][0]['rows'][0][1], ('3 (-2)', 3))
+        tables = {t['title']: t for t in rep['sections'][1]['tables']}
+        self.assertEqual([r[1:3] for r in tables['Fleets']['rows']], [['war', 'Trireme'], ['civil', 'Quinquereme']])
+        self.assertEqual([r[1] for r in tables['Troops']['rows']], ['Legion'])            # towers are not troops
         self.assertEqual([a['level'] for a in rep['alarms']], sorted((a['level'] for a in rep['alarms']),
                          key=['high', 'medium', 'info'].index))
-        self.assertEqual(rep['sections'][0]['elapsed_min'], 0)
+        self.assertEqual(rep['sections'][1]['elapsed_min'], 0)
         cards = {(g['kind'], g['place']): g for g in rep['groups']}
         self.assertEqual(cards[('route', 'Empty')]['detail'], 'Roma · 0 ships')
         self.assertEqual(cards[('island', 'Roma (latium)')]['level'], 'high')
@@ -670,3 +694,35 @@ class TestReport(TempDirMixin, unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class TestReportRoutes(unittest.TestCase):
+    def test_same_name_routes_get_their_own_card(self):
+        area = {'area': 7, 'owner': 41, 'city': 'Roma'}
+        rt = lambda i: {'id': i, 'name': 'Same', 'owner': 41, 'ships': [], 'stations': [
+            {'area': 7, 'session': 'x', 'city': 'Roma', 'goods': {}}]}
+        r = {'session': 'x', 'participants': [], 'areas': [area], 'trade_routes': [rt(1), rt(2)]}
+        rep = A.report_data([r], None, {41})
+        self.assertEqual(len([g for g in rep['groups'] if g['kind'] == 'route']), 2)
+
+    def test_foreign_stop_is_not_called_dry(self):
+        r = {'session': 'x', 'participants': [], 'trade_routes': [{'id': 1, 'name': 'Beer', 'owner': 41, 'ships': [9],
+             'stations': [{'area': 7, 'session': 'x', 'city': 'Roma', 'goods': {'Beer': 0}},
+                          {'area': 8, 'session': 'x', 'city': 'Elsewhere', 'goods': {'Beer': 0}}]}],
+             'areas': [{'area': 7, 'owner': 41, 'city': 'Roma'}, {'area': 8, 'owner': 99, 'city': 'Elsewhere'}]}
+        rep = A.report_data([r], None, {41})
+        self.assertFalse(any('not produced' in a['text'] for a in rep['alarms']))
+
+    def test_npc_traders_are_left_out(self):
+        self.assertEqual(A.participant_kind(5, {5: {'template': 'Participant 3rdParty'}}, set()), 'npc')
+        self.assertEqual(A.participant_kind(6, {6: {'template': 'Participant 3rdParty Pirate'}}, set()), 'pirate')
+        self.assertEqual(A.participant_kind(7, {7: {'template': 'Participant 2ndParty (Rival)'}}, set()), 'rival')
+        r = {'session': 'x', 'participant_kinds': {'50': 'npc', '60': 'rival'}, 'trade_routes': [],
+             'participants': [{'participant': 50, 'name': 'Trader', 'ship_count': 8, 'warships': 8, 'civil_ships': 0,
+                               'troops': 0, 'units': [], 'ships': [{'type': 'Trireme', 'guid': 1, 'count': 8}]},
+                              {'participant': 60, 'name': 'Rival', 'ship_count': 2, 'warships': 2, 'civil_ships': 0,
+                               'troops': 0, 'units': [], 'ships': [{'type': 'Trireme', 'guid': 1, 'count': 2}]}],
+             'areas': [{'area': 1, 'owner': 50, 'owner_name': 'Trader'}, {'area': 2, 'owner': 60, 'owner_name': 'Rival'}]}
+        page = A.render_md(A.report_data([r], None, {41}))
+        self.assertNotIn('Trader', page)
+        self.assertIn('Rival', page)

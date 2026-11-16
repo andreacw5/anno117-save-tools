@@ -100,6 +100,19 @@ In the saves we analysed, participant **41** was the human player. AI factions a
 other GUIDs (31099, 31100, 153067…). The pirate faction's participant GUID equals the `guid` of its
 `Pirate` object (for example 153069 for the Kashta in the Nile).
 
+### Ship roles, troops and kinds of participant
+
+- Each ship gets `role`: `war` when it carries a weapon module (internal names with Archers,
+  Catapult, Scorpion or Torchers) or its asset is military by design (`Military`, `Raider`,
+  `Warship`, `Pirate` in the internal name, e.g. *Egyptian RiverShip Dahabiya Military*); otherwise
+  `civil` (sails only, river boats such as the Felluca, *Dahabiya Civil*, start ships). Each
+  participant gets `warships` and `civil_ships`.
+- Units whose asset template is `LandUnit` are troops (`"troop": true`, and `troops` per
+  participant); the other units are towers, gates and harbours.
+- `participant_kinds` maps each participant to `human`, `rival` (template `2ndParty (Rival)`),
+  `pirate` (`3rdParty Pirate`) or `npc` (other `Participant` templates: traders, imperial envoys
+  and neutral parties, who hold one harbour that cannot be conquered). `report` leaves `npc` out.
+
 ## 5. Islands (areas)
 
 Each island, or district (*nome*) on the Nile, is an **area**. Two places describe it:
@@ -166,23 +179,29 @@ mud bricks (151704) 19. Goods with amount 0 can be listed. `extract` writes the 
 
 `AreaEconomy/StorageTrends` holds the data of the game's warehouse chart: pairs of a good GUID and
 a record with `Points` (`capacity` and `size` = 120, then 120 `uint32` stock samples, oldest
-first, the last one equal to the current stock), `LastPointTime` (game time in ms) and
+first, the last one being the current stock), `LastPointTime` (game time in ms) and
 `Estimation` (0 in every save seen). Samples are **10 game seconds** apart, so a save holds the
 last 20 minutes: two saves 180 s apart had `LastPointTime` 180000 ms apart and series shifted by
 18 samples. `extract` writes, per good, `stock_trends`: `outflow_per_minute` and
 `inflow_per_minute` (sum of the falls and of the rises between samples: consumption and ships
-loading, production and ships unloading), `net_per_minute` (last minus first sample, per minute)
-and `max` (the highest sample).
+loading, production and ships unloading), `net_per_minute` (last minus first sample, per minute),
+`first`, `last` and `max` (the highest sample).
+
+`StrgLrg` and the chart disagree for many goods held at a storage limit: in the saves we checked,
+`StrgLrg` reads 0 (or omits the good) while the chart's last samples sit at the limit (749, 750,
+749). When the chart exists, `extract` therefore writes its last sample as the good's `storage`.
 
 Storage limits are not stored, and they differ between goods of one area (for example 450 for
 most goods and 1950 for some raw materials). Goods held at a limit all peak at the same value, so
-`storage_limits_estimate` lists every peak shared by at least two goods; a good is "at limit" when
-its peak is one of them and the stock is within 2% of it.
+`storage_limits_estimate` lists every peak shared by at least three goods; a good is "at limit"
+when its stock is within 2% of one of them (and its own peak did not go past it).
 
 ### Game time
 
 `GameSessionManager/SessionTotalTime` (per province, ms of game time) is written by `extract` as
-`session_time_ms`; the difference between two saves is the game time that passed between them.
+`session_time_ms`. Each province keeps its own clock: between the same two saves we measured 29.8,
+18.5 and 7.7 minutes in three provinces, so the difference is the time that province ran, not the
+time between the saves.
 
 ### City names
 

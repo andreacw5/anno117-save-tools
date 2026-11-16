@@ -12,7 +12,9 @@ No dependencies, Python 3.8 or newer.
   with islands, buildings, ships and units coloured by owner and pirate structures marked.
 - **`report`**: one HTML page (and optionally Markdown) on your state: alarms first (goods running
   out, idle buildings, workforce shortages, routes without ships or stock, losses since an earlier
-  save), then per province your islands, all players, fleets, routes and warehouses.
+  save) grouped per island and per route with a hint, warships, civil ships and troops per player
+  across all provinces, then per province your islands, players, fleets, troops, routes and
+  warehouses. Traders and imperial envoys (NPCs that cannot be attacked) are left out.
 - **`list`**: browse the contents of `.rda` archives.
 - **`guid-table`**: render the GUID map as a Markdown page.
 

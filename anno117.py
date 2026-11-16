@@ -247,7 +247,18 @@ def session_objects(sroot):
     for am in area_managers(sroot):
         yield from area_objects(am)
 
-def session(sroot, owners, names, gmap, radius, texts=None):
+RE_WEAPON_MODULE = re.compile(r'archer|catapult|scorpion|torcher', re.I)
+RE_MILITARY_SHIP = re.compile(r'military|raider|warship|pirate', re.I)
+
+def ship_role(g, mods, info, gmap):
+    """'war' when the ship carries a weapon module (archers, catapult, scorpion, torchers) or its
+    asset is a military one (e.g. 'Egyptian RiverShip Dahabiya Military'); otherwise 'civil'
+    (cargo ships with sails only, river boats, start ships). Uses internal asset names."""
+    iname = lambda x: (info.get(x) or {}).get('name') or gmap.get(x) or ''
+    return 'war' if any(RE_WEAPON_MODULE.search(iname(m)) for m in mods) or RE_MILITARY_SHIP.search(iname(g)) else 'civil'
+
+def session(sroot, owners, names, gmap, radius, texts=None, info=None):
+    info = info or {}
     name = lambda g: gmap.get(g, f'GUID {g}')
     ships = collections.defaultdict(lambda: collections.defaultdict(list))
     units = collections.defaultdict(collections.Counter)
@@ -272,7 +283,8 @@ def session(sroot, owners, names, gmap, radius, texts=None):
             mods = sorted(u(m.value) for ism in ch(smo, 'InstalledShipModules')
                           for t in ism.children for m in ch(t, 'ShipModuleGuid'))
             nm = ship_name(ob, texts or {})
-            ships[owner][g].append({**({'name': nm} if nm else {}), 'modules': [name(m) for m in mods],
+            ships[owner][g].append({**({'name': nm} if nm else {}), 'role': ship_role(g, mods, info, gmap),
+                                    'modules': [name(m) for m in mods],
                                     'module_guids': mods,
                                     'position': [round(pos[0]), round(pos[2])]})
         elif one(ob, 'Unit') is not None:
@@ -280,13 +292,19 @@ def session(sroot, owners, names, gmap, radius, texts=None):
     parts = []
     for owner in sorted(set(ships) | set(units), key=lambda x: (x is None, x or 0)):
         sh = ships.get(owner, {})
+        un = units.get(owner, {})
+        troop = lambda g: (info.get(g) or {}).get('template') == 'LandUnit'
         parts.append({
             'participant': owner,
             'name': names.get(owner) or (gmap.get(owner) if owner is not None else 'unknown owner'),
             'ship_count': sum(len(v) for v in sh.values()),
+            'warships': sum(s['role'] == 'war' for v in sh.values() for s in v),
+            'civil_ships': sum(s['role'] == 'civil' for v in sh.values() for s in v),
+            'troops': sum(n for g, n in un.items() if troop(g)),
             'ships': [{'type': name(g), 'guid': g, 'count': len(v), 'ships': v} for g, v in sorted(sh.items())],
             'squadrons': cluster([tuple(s['position']) for v in sh.values() for s in v], radius),
-            'units': [{'type': name(g), 'guid': g, 'count': n} for g, n in sorted(units.get(owner, {}).items())],
+            'units': [{'type': name(g), 'guid': g, 'count': n, **({'troop': True} if troop(g) else {})}
+                      for g, n in sorted(un.items())],
         })
     return {'participants': parts, 'pirates': pirates}
 
@@ -394,19 +412,21 @@ def stock_history(tr):
         out[u(k.value)] = {'net_per_minute': round((pts[-1] - pts[0]) / minutes, 2),
                            'outflow_per_minute': round(-sum(s for s in steps if s < 0) / minutes, 2),
                            'inflow_per_minute': round(sum(s for s in steps if s > 0) / minutes, 2),
-                           'max': max(pts), 'minutes': round(minutes, 1)}
+                           'max': max(pts), 'first': pts[0], 'last': pts[-1], 'minutes': round(minutes, 1)}
     return out
 
 def storage_limits(peaks):
     """Storage limits are not in the save, and they differ between goods of the same area (e.g.
     450 for most goods, 1950 for some raw materials). Goods held at a limit all peak at the same
-    value, so every peak shared by at least two goods is taken as a limit."""
+    value, so every peak shared by at least three goods is taken as a limit."""
     c = collections.Counter(p for p in peaks if p >= 20)
-    return sorted(v for v, n in c.items() if n >= 2)
+    return sorted(v for v, n in c.items() if n >= 3)
 
 def at_limit(stock, trend, limits):
-    """True when a good sits at one of its area's storage limits."""
-    return bool(trend) and trend['max'] in limits and stock >= 0.98 * trend['max']
+    """True when a good's stock is within 2% of one of its area's storage limits and its own peak
+    did not go past that limit (so a 450 good is not 'at limit' in an area whose limits are 450 and 1950
+    only because of the 450)."""
+    return any(abs(stock - lim) <= 0.02 * lim and (not trend or trend['max'] <= lim * 1.02) for lim in limits)
 
 def f32(n):
     return struct.unpack('<f', n.value)[0] if n is not None and n.value is not None and len(n.value) == 4 else None
@@ -527,7 +547,12 @@ def areas(sroot, names, gmap, texts, ainfo=None):
             e['storage'] = {name(g): n for g, n in goods}
             e['storage_guids'] = {str(g): n for g, n in goods}
         hist = stock_history(one(eco, 'StorageTrends'))
-        if hist:
+        if hist:                    # StrgLrg reads 0 for many goods that the chart shows full: trust the chart
+            raw = {int(g): n for g, n in e.get('storage_guids', {}).items()}
+            raw.update({g: t['last'] for g, t in hist.items()})
+            goods = sorted(((g, n) for g, n in raw.items() if n), key=lambda x: -x[1])
+            e['storage'] = {name(g): n for g, n in goods}
+            e['storage_guids'] = {str(g): n for g, n in goods}
             e['stock_trends'] = {name(g): t for g, t in sorted(hist.items(), key=lambda kv: kv[1]['net_per_minute'])}
             lim = storage_limits([t['max'] for t in hist.values()])
             if lim: e['storage_limits_estimate'] = lim
@@ -624,6 +649,15 @@ def attach_routes(results, routes, ships, names, gmap):
         for key in ('supplies', 'receives'):
             if f[key]: areas_by_id[k][key] = {g: sorted(v) for g, v in sorted(f[key].items())}
 
+def participant_kind(g, info, humans):
+    """'human', 'rival' (AI competitors), 'pirate', or 'npc' (traders, imperial envoys and neutral
+    parties: one unconquerable harbour, not attackable), from the participant asset's template."""
+    t = (info.get(g) or {}).get('template') or ''
+    if g in humans or 'Human' in t: return 'human'
+    if 'Rival' in t or '2ndParty' in t: return 'rival'
+    if 'Pirate' in t: return 'pirate'
+    return 'npc' if t.startswith('Participant') else None
+
 def name_paths(a):
     return a.names if a.names else ['guid_names.json'] if os.path.exists('guid_names.json') else []
 
@@ -634,6 +668,8 @@ def extract_results(save, paths, texts_files=None, city_names=None, radius=40):
     owners, names = meta_map(data_root)
     humans = sorted(p for p, n in names.items() if n)
     utexts = user_texts(data_root)
+    kinds = {str(g): k for g in set(owners.values()) | set(names)
+             for k in [participant_kind(g, info, set(humans))] if k}
     texts = read_texts(texts_files) if texts_files else {}   # resolves the areas' default city names
     results, ships, seen = [], {}, set()
     for sg, sroot in save_sessions(data_root):
@@ -644,8 +680,8 @@ def extract_results(save, paths, texts_files=None, city_names=None, radius=40):
         st = one(one(sroot, 'GameSessionManager'), 'SessionTotalTime')
         results.append({'session': label, 'session_guid': sg, 'save': os.path.basename(save),
                         **({'session_time_ms': u(st.value)} if st is not None and st.value else {}),
-                        'human_players': humans,
-                        **session(sroot, owners, names, gmap, radius, texts),
+                        'human_players': humans, 'participant_kinds': kinds,
+                        **session(sroot, owners, names, gmap, radius, texts, info),
                         'areas': areas(sroot, names, gmap, texts, info)})
     # trade routes cross provinces, so cities are matched to route codes over the whole save
     name_cities([e for r in results for e in r['areas']], utexts, set(humans))
@@ -696,25 +732,48 @@ def production_counts(e):
     idle = sum((e.get('idle_reasons') or {}).values())
     return total, idle
 
+ROLE_LABEL = {'war': 'war', 'civil': 'civil', None: '?'}
+
+def fleet(p):
+    """(role, ship type) -> count; role is None in JSON written before roles existed."""
+    c = collections.Counter()
+    for t in p.get('ships', []):
+        for s in t.get('ships', []): c[(s.get('role'), t['type'])] += 1
+        if not t.get('ships'): c[(None, t['type'])] += t['count']
+    return c
+
+def troops(p):
+    c = collections.Counter()
+    for un in p.get('units', []):
+        if un.get('troop'): c[un['type']] += un['count']
+    return c
+
+def forces(p):
+    """(warships, civil ships, troops); None where the JSON predates these fields."""
+    return [p.get('warships'), p.get('civil_ships'), p.get('troops')]
+
+def force_cells(p, old):
+    """Cells for forces(); an empty participant (no ships or units there) counts as zero."""
+    f = forces(p) if p else [0, 0, 0]
+    o = [None] * 3 if old is None else forces(old) if old else [0, 0, 0]
+    return [cell(v, ov) if v is not None else ('', None) for v, ov in zip(f, o)]
+
 def report_data(cur, prev, humans, horizon=60):
     """Alarms and tables of the report, as plain data (rendered as Markdown or HTML)."""
     prev_s = {r['session']: r for r in prev or []}
     alarms, sections, seen_routes = [], [], set()
     is_human = lambda o: o in humans
-    def alarm(level, kind, place, text, hint=''):
-        alarms.append({'level': level, 'kind': kind, 'place': place, 'text': text, 'hint': hint})
+    kinds = {k: v for r in cur + (prev or []) for k, v in (r.get('participant_kinds') or {}).items()}
+    npc = lambda o: kinds.get(str(o)) == 'npc'          # traders and envoys: left out of players and forces
+    def alarm(level, kind, place, text, hint='', key=None):
+        alarms.append({'level': level, 'kind': kind, 'place': place, 'key': key or place, 'text': text, 'hint': hint})
     details = {}                                    # (kind, place) -> line under the place's name
     area_at = {(x['session'], e['area']): e for x in cur for e in x['areas']}
-    ships_now, ships_before = collections.Counter(), collections.Counter()
     for r in cur:
         pr = prev_s.get(r['session'])
         old_area = {e['area']: e for e in (pr or {}).get('areas', [])}
         label = r['session']
         mine = sorted((e for e in r['areas'] if is_human(e.get('owner'))), key=lambda e: -(e.get('population') or 0))
-        for p in r['participants']:
-            if is_human(p['participant']): ships_now[p['name']] += p['ship_count']
-        for p in (pr or {}).get('participants', []):
-            if is_human(p['participant']): ships_before[p['name']] += p['ship_count']
         # ---- islands of the human players
         for e in mine:
             place, pe = f'{city_of(e)} ({label})', old_area.get(e['area'])
@@ -730,20 +789,22 @@ def report_data(cur, prev, humans, horizon=60):
                 why = ', '.join(f'{k} ×{n}' for k, n in list(other.items())[:3])
                 isl('medium', f'{sum(other.values())} production buildings stopped: {why}',
                     'missing inputs or paused buildings: check their supply chain')
-            if total >= 4 and full >= total / 4:
+            if total >= 4 and full >= total / 2:
                 isl('info', f'overproduction: {full} of {total} production buildings idle, nobody collects their output',
                     'pause or demolish the surplus, or ship it where it is needed')
             st, made = e.get('storage') or {}, e.get('output_capacity') or {}
             for g, t in sorted((e.get('stock_trends') or {}).items()):
                 stock, net = st.get(g, 0), t['net_per_minute']
-                if stock > 0 and net <= -0.1 and stock / -net < horizon:
+                drop = t.get('first', stock - net * t['minutes']) - stock
+                if stock > 0 and net <= -0.1 and drop >= max(10, 0.2 * t['max']) and stock / -net < horizon:
                     mins = stock / -net
-                    src = (e.get('receives') or {}).get(g)
+                    src, dst = (e.get('receives') or {}).get(g), (e.get('supplies') or {}).get(g)
                     isl('high' if mins < horizon / 3 else 'medium',
-                        f'{g}: {stock} left, falling {-net:g}/min, empty in ~{mins:.0f} min',
+                        f'{g}: {stock} left, down {drop:g} in {t["minutes"]:g} min, empty in ~{mins:.0f} min',
                         f'arrives from {", ".join(src)}: add ships or raise the amount on that route' if src else
+                        f'shipped to {", ".join(dst)}: lower the amount on that route or build more' if dst else
                         'produced here: build more' if g in made else 'nothing brings it here: add a route or build production')
-                elif not stock and t['max'] and t['outflow_per_minute'] and g not in made:
+                elif not stock and t['max'] >= 10 and t['outflow_per_minute'] and g not in made:
                     isl('medium', f'{g}: ran out in the last {t["minutes"]:g} min (it was {t["max"]})',
                         'consumed here but not produced: check the routes that should bring it')
             if pe:
@@ -764,15 +825,16 @@ def report_data(cur, prev, humans, horizon=60):
         for rt in routes:
             if rt['id'] in seen_routes: continue
             seen_routes.add(rt['id'])
-            place = rt['name'] or f"route {rt['id']}"
+            place, key = rt['name'] or f"route {rt['id']}", f"route {rt['id']}"
             stops = [(st, area_at.get((st['session'], st['area']), {})) for st in rt['stations']]
-            details[('route', place)] = (' → '.join(st['city'] or f"area {st['area']}" for st, _ in stops)
+            details[('route', key)] = (' → '.join(st['city'] or f"area {st['area']}" for st, _ in stops)
                                          + f' · {len(rt["ships"])} ship' + ('' if len(rt['ships']) == 1 else 's'))
-            ra = lambda level, text, hint='', place=place: alarm(level, 'route', place, text, hint)
+            ra = lambda level, text, hint='', place=place, key=key: alarm(level, 'route', place, text, hint, key)
             goods = sorted({g for st in rt['stations'] for g in st['goods']})
             if not rt['ships']: ra('high', 'no ships assigned', 'assign ships or delete the route')
             if not goods: ra('medium', 'no goods set at any stop', 'the ships sail empty: set goods or delete the route')
-            dry = [g for g in goods if not any((e.get('output_capacity') or {}).get(g) or (e.get('storage') or {}).get(g)
+            known = all(e and is_human(e.get('owner')) for _, e in stops)   # else a stop's stock is unknown
+            dry = [] if not known else [g for g in goods if not any((e.get('output_capacity') or {}).get(g) or (e.get('storage') or {}).get(g)
                                                for _, e in stops)]
             if goods and len(dry) == len(goods):
                 ra('medium', f'none of its goods ({", ".join(dry)}) is produced or stocked at any stop',
@@ -786,8 +848,8 @@ def report_data(cur, prev, humans, horizon=60):
                         if i != src and g in st['goods'] and e and at_limit((e.get('storage') or {}).get(g, 0),
                            (e.get('stock_trends') or {}).get(g), e.get('storage_limits_estimate') or [])]
                 if full and src is not None:
-                    ra('info', f'{g} → {", ".join(full)}: destination already at its storage limit',
-                       'nothing is unloaded: lower the amount or move the ships to a route that needs them')
+                    ra('info', f'{g} at {", ".join(full)}: already at its storage limit',
+                       'if the route unloads it there, nothing is delivered: lower the amount or reuse the ships')
         # ---- tables
         tables = []
         rows = []
@@ -801,7 +863,7 @@ def report_data(cur, prev, humans, horizon=60):
             rows.append([city_of(e), e.get('city_status') or '', cell(e.get('population'), pe.get('population')),
                          cell(e.get('income_per_minute'), pe.get('income_per_minute')),
                          cell(min(wf.values()), min((pe.get('workforce_saturation') or {'': None}).values()), pct=True) if wf else ('', None),
-                         (f'{total - idle} / {total}', (total - idle) / total if total else None),
+                         (f'{total - idle} / {total}', (total - idle) / total if total else -1),
                          cell(e.get('idle_output_full', 0)), cell(other),
                          (f'{full} / {len(st)}', full), (str(len(e.get('trade_routes') or {})), len(e.get('trade_routes') or {}))])
         if rows:
@@ -811,7 +873,7 @@ def report_data(cur, prev, humans, horizon=60):
                            'Goods at limit: stock at a storage limit, estimated from the last 20 minutes of the warehouse chart.'})
         owners = collections.defaultdict(lambda: {'n': 0, 'pop': 0, 'inc': 0, 'name': None})
         for e in r['areas']:
-            if e.get('owner') is None: continue
+            if e.get('owner') is None or npc(e['owner']): continue
             o = owners[e['owner']]; o['n'] += 1; o['pop'] += e.get('population') or 0
             o['inc'] += e.get('income_per_minute') or 0; o['name'] = e.get('owner_name') or str(e['owner'])
         old_owners, old_inc = collections.Counter(), collections.Counter()
@@ -826,19 +888,28 @@ def report_data(cur, prev, humans, horizon=60):
             p, op = parts.get(o) or {}, old_parts.get(o)
             rows.append([x['name'] + (' (you)' if is_human(o) else ''), (str(x['n']), x['n']),
                          cell(x['pop'], old_owners[o] if pr else None), cell(x['inc'], old_inc[o] if pr else None),
-                         cell(p.get('ship_count', 0), op.get('ship_count', 0) if op else None),
-                         cell(sum(un['count'] for un in p.get('units', [])))])
+                         *force_cells(p, (op or {}) if pr else None)])
         if rows:
-            tables.append({'title': 'Players', 'headers': ['Owner', 'Islands', 'Population', 'Income/min', 'Ships', 'Land units'],
-                           'rows': rows})
+            tables.append({'title': 'Players', 'headers': ['Owner', 'Islands', 'Population', 'Income/min',
+                                                           'Warships', 'Civil ships', 'Troops'], 'rows': rows})
         rows = []
         for p in r['participants']:                 # variants with the same name (e.g. AI ships) are merged
-            now, before = collections.Counter(), collections.Counter()
-            for s in p['ships']: now[s['type']] += s['count']
-            for s in (old_parts.get(p['participant']) or {}).get('ships', []): before[s['type']] += s['count']
+            if npc(p['participant']): continue
+            now, before = fleet(p), fleet(old_parts.get(p['participant']) or {})
+            keys = set(now) | (set(before) if is_human(p['participant']) else set())
+            for role, t in sorted(keys, key=lambda k: (k[0] != 'war', k[1])):
+                rows.append([p['name'] or 'unknown owner', ROLE_LABEL.get(role, role), t,
+                             cell(now[(role, t)], before[(role, t)] if pr else None)])
+        if rows: tables.append({'title': 'Fleets', 'headers': ['Owner', 'Role', 'Ship type', 'Ships'], 'rows': rows,
+                                'note': 'Warships carry weapon modules (archers, catapult, scorpion, torchers) or are '
+                                        'military by design; the others are civil (cargo, river boats).'})
+        rows = []
+        for p in r['participants']:
+            if npc(p['participant']): continue
+            now, before = troops(p), troops(old_parts.get(p['participant']) or {})
             for t in sorted(set(now) | (set(before) if is_human(p['participant']) else set())):
                 rows.append([p['name'] or 'unknown owner', t, cell(now[t], before[t] if pr else None)])
-        if rows: tables.append({'title': 'Fleets', 'headers': ['Owner', 'Ship type', 'Ships'], 'rows': rows})
+        if rows: tables.append({'title': 'Troops', 'headers': ['Owner', 'Unit', 'Count'], 'rows': rows})
         rows = []
         for rt in routes:
             stops = ' → '.join(st['city'] or f"area {st['area']}" for st in rt['stations'])
@@ -862,16 +933,38 @@ def report_data(cur, prev, humans, horizon=60):
         t0, t1 = (pr or {}).get('session_time_ms'), r.get('session_time_ms')
         sections.append({'id': label, 'title': label.capitalize(), 'tables': tables,
                          'elapsed_min': (t1 - t0) / 60000 if t0 and t1 else None})
-    for who in sorted(set(ships_now) | set(ships_before)):
-        if prev and ships_now[who] < ships_before[who]:
-            alarm('high', 'player', who, f'{ships_before[who] - ships_now[who]} ships fewer than in the previous save '
-                                         f'({ships_before[who]} → {ships_now[who]})', 'sunk, or moved elsewhere')
+    # ---- all provinces together: forces per participant
+    total, total_before, pname = {}, {}, {}
+    for res, acc in ((cur, total), (prev or [], total_before)):
+        for r in res:
+            for p in r['participants']:
+                if p['participant'] is None or npc(p['participant']): continue
+                pname[p['participant']] = p['name']
+                f = forces(p)
+                a = acc.setdefault(p['participant'], [0, 0, 0, set()])
+                for i in range(3): a[i] = None if a[i] is None or f[i] is None else a[i] + f[i]
+                if any(f[:3]): a[3].add(r['session'])
+    rows = []
+    for o, a in sorted(total.items(), key=lambda kv: (not is_human(kv[0]), -(kv[1][0] or 0))):
+        if not any(a[:3]): continue
+        b = total_before.get(o) if prev else None
+        rows.append([(pname[o] or str(o)) + (' (you)' if is_human(o) else '')]
+                    + [cell(a[i], (b[i] if b else 0) if prev else None) for i in range(3)] + [', '.join(sorted(a[3]))])
+        if is_human(o) and b:
+            for i, what, level in ((0, 'warships', 'high'), (1, 'civil ships', 'medium'), (2, 'troops', 'high')):
+                if a[i] is not None and b[i] is not None and a[i] < b[i]:
+                    alarm(level, 'player', pname[o], f'{b[i] - a[i]} {what} fewer than in the previous save '
+                                                     f'({b[i]} → {a[i]})', 'lost in battle, sold or disbanded')
+    if rows:
+        sections.insert(0, {'id': 'forces', 'title': 'All provinces', 'elapsed_min': None, 'tables': [{
+            'title': 'Forces per player', 'headers': ['Player', 'Warships', 'Civil ships', 'Troops', 'Present in'],
+            'rows': rows}]})
     order = {'high': 0, 'medium': 1, 'info': 2}
     alarms.sort(key=lambda x: order[x['level']])
     groups = collections.OrderedDict()            # one card per island / route / player, worst first
     for x in alarms:
-        g = groups.setdefault((x['kind'], x['place']), {'kind': x['kind'], 'place': x['place'], 'level': x['level'],
-                                                         'detail': details.get((x['kind'], x['place']), ''), 'items': []})
+        g = groups.setdefault((x['kind'], x['key']), {'kind': x['kind'], 'place': x['place'], 'level': x['level'],
+                                                       'detail': details.get((x['kind'], x['key']), ''), 'items': []})
         g['items'].append(x)
     cards = sorted(groups.values(), key=lambda g: (order[g['level']], -sum(order[i['level']] < 2 for i in g['items'])))
     return {'save': cur[0].get('save'), 'previous': (prev or [{}])[0].get('save'),
@@ -904,7 +997,8 @@ def render_md(rep):
             out.append('')
     for s in rep['sections']:
         out += ['', f"## {s['title']}", '']
-        if s['elapsed_min'] is not None: out += [f"Game time since the previous save: {s['elapsed_min']:.1f} min.", '']
+        if s['elapsed_min'] is not None: out += [f"Game time in this province since the previous save: {s['elapsed_min']:.1f} min "
+                    "(each province keeps its own clock)." + (' The compared save is the newer one.' if s['elapsed_min'] < 0 else ''), '']
         for t in s['tables']:
             out += [f"### {t['title']}", '']
             if t.get('note'): out += [t['note'], '']
@@ -926,7 +1020,7 @@ h1{font-size:26px;margin:0 0 4px}h2{font-size:20px;margin:36px 0 12px;color:var(
 h3{font-size:16px;margin:20px 0 8px}.muted{color:var(--muted)}
 nav{display:flex;flex-wrap:wrap;gap:8px;margin:16px 0}nav a{padding:4px 12px;border:1px solid var(--line);
 border-radius:999px;color:var(--text);text-decoration:none;background:var(--panel)}
-.cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(340px,1fr));gap:12px}
+.cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(min(340px,100%),1fr));gap:12px}
 .card{background:var(--panel);border:1px solid var(--line);border-left-width:4px;border-radius:8px;padding:10px 14px}
 .high-edge{border-left-color:var(--high)}.medium-edge{border-left-color:var(--medium)}.info-edge{border-left-color:var(--info)}
 .place{font-weight:700}.detail{font-size:13px;color:var(--muted);margin-top:2px}
@@ -938,7 +1032,7 @@ font-size:12px;font-weight:600;text-transform:uppercase;border-radius:4px;paddin
 .wrap{overflow-x:auto;background:var(--panel);border:1px solid var(--line);border-radius:8px}
 table{border-collapse:collapse;width:100%;font-size:14px}th,td{padding:6px 10px;text-align:left;
 border-bottom:1px solid var(--line);white-space:nowrap}td.num,th.num{text-align:right;font-variant-numeric:tabular-nums}
-th{cursor:pointer;user-select:none;position:sticky;top:0;background:var(--panel)}tr:last-child td{border-bottom:0}
+th{cursor:pointer;user-select:none;background:var(--panel)}tr:last-child td{border-bottom:0}
 details{margin:8px 0}summary{cursor:pointer;font-weight:600;padding:4px 0}img{max-width:100%;border-radius:8px;
 border:1px solid var(--line)}.note{font-size:13px;color:var(--muted);margin:6px 0}footer{margin:40px 0;font-size:13px}
 """
@@ -988,7 +1082,8 @@ def render_html(rep, images):
     for s in rep['sections']:
         out.append(f'<h2 id="{h(s["id"])}">{h(s["title"])}</h2>')
         if s['elapsed_min'] is not None:
-            out.append(f'<p class="muted">Game time since the previous save: {s["elapsed_min"]:.1f} min.</p>')
+            out.append(f'<p class="muted">Game time in this province since the previous save: {s["elapsed_min"]:.1f} min '
+                       '(each province keeps its own clock).' + (' The compared save is the newer one.' if s['elapsed_min'] < 0 else '') + '</p>')
         img = images.get(s['id'])
         if img:
             with open(img, 'rb') as f:
