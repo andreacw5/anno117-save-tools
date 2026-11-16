@@ -1657,26 +1657,47 @@ def tile_layers(tiles, game):
         entries.close()
     return [t for t in tiles if 'size' in t and 'img' in t]
 
-def compose_terrain(tiles):
+MAP_SEA = (15, 47, 40)            # the colour the game's map images use for open water
+MAP_FILLS = [(0, 0, 0), MAP_SEA, (34, 36, 40)]   # flat colours where a tile image has no terrain
+
+def tile_alpha(img):
+    """Transparency of a tile image: 0 on the flat fill colours (black, open water, dark grey) the
+    images use where they hold no terrain, with isolated specks removed, so overlapping tiles do
+    not cover each other with empty blocks."""
+    from PIL import Image, ImageChops, ImageFilter
+    out = None
+    for c in MAP_FILLS:
+        diff = ImageChops.difference(img, Image.new('RGB', img.size, c)).convert('L')
+        a = diff.point(lambda v: 0 if v < 5 else 255 if v > 12 else (v - 5) * 36)
+        out = a if out is None else ImageChops.darker(out, a)
+    return out.filter(ImageFilter.MinFilter(5)).filter(ImageFilter.MaxFilter(5))
+
+def grid_mask(grid, size):
+    """ActiveMapGrid (one bit per 8x8 cell, rows padded to 64 bits) as a mask, smoothed when
+    scaled up so the edges are not 8-pixel steps."""
     from PIL import Image
+    X, Y, bits = grid; rb = len(bits) // Y
+    m = Image.new('L', (X, Y), 0); px = m.load()
+    for gy in range(Y):
+        row = int.from_bytes(bits[gy * rb:(gy + 1) * rb], 'little')
+        for gx in range(X):
+            if row >> gx & 1: px[gx, Y - 1 - gy] = 255      # grid rows go north, image rows south
+    return m.resize((size, size), Image.BILINEAR)
+
+def compose_terrain(tiles):
+    from PIL import Image, ImageChops, ImageFilter
     H = max(max(t['pos'][0] + t['size'][0], t['pos'][1] + t['size'][1]) for t in tiles)
-    im = Image.new('RGB', (H, H), (20, 24, 28))
+    im = Image.new('RGB', (H, H), MAP_SEA)
     for t in tiles:
         S = t['size'][0]
-        img = t['img'].resize((S, S))
-        mask = None
-        if 'grid' in t:
-            X, Y, bits = t['grid']; rb = len(bits) // Y
-            m = Image.new('L', (X, Y), 0); px = m.load()
-            for gy in range(Y):
-                row = int.from_bytes(bits[gy * rb:(gy + 1) * rb], 'little')
-                for gx in range(X):
-                    if row >> gx & 1: px[gx, Y - 1 - gy] = 255      # grid rows go north, image rows south
-            mask = m.resize((S, S), Image.NEAREST)
+        img = t['img'].resize((S, S), Image.LANCZOS)
+        alpha = tile_alpha(img)
+        if 'grid' in t: alpha = ImageChops.multiply(alpha, grid_mask(t['grid'], S))
+        alpha = alpha.filter(ImageFilter.GaussianBlur(1.5))              # soft seams between tiles
         if t['rot']:
-            img, mask = img.rotate(90 * t['rot']), mask.rotate(90 * t['rot']) if mask else None
+            img, alpha = img.rotate(90 * t['rot']), alpha.rotate(90 * t['rot'])
         x, z = t['pos']
-        im.paste(img, (x, H - z - S), mask)
+        im.paste(img, (x, H - z - S), alpha)
     return im
 
 def cmd_map(a):

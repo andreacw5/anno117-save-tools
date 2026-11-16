@@ -75,10 +75,17 @@ after them and win):
 | File | Content |
 |---|---|
 | `<tile>.a7minfo` | FileDB: `MapSize` (two `int32`, e.g. 448×448), `ActiveMapGrid` (`x`, `y`, `bits`: one bit per 8×8 cell, rows padded to 64 bits, the part of the tile that is really used), `ActiveMapRect` |
-| `_gamedata/<tile>/mapimage_0.dds` | the tile's map picture, 512×512, BC7 (DXGI 98), north up |
+| `_gamedata/<tile>/mapimage_0.dds` | the tile's map picture, 512×512, BC7 (DXGI 98), north up; its alpha channel is fully opaque |
+| `_gamedata/<tile>/gamemapimage_0.dds`, `provincemapimage_0.dds`, `activemapimage_0.dds` | other renderings (e.g. 704×704 or 768×512) with real transparency around the land; how they are placed on the tile is not decoded yet |
 
-`map` pastes each picture scaled to `MapSize` at `Position`, masked by the active grid. Map
-coordinates match those of ships and buildings in the save, with z pointing north.
+`map` pastes each `mapimage` scaled to `MapSize` at `Position`. Map coordinates match those of
+ships and buildings in the save, with z pointing north. The pictures fill the parts without
+terrain with flat colours: black (Roman and Celtic islands sit on black), open water
+`(15, 47, 40)` and a dark grey `(34, 36, 40)` (Nile tiles). `map` makes those transparent
+(isolated specks removed), multiplies by the active grid scaled up smoothly, softens the edges,
+and composes on a water-coloured background, so overlapping tiles do not cover each other with
+empty blocks. Where no tile has terrain (parts of the Nile valley) the background shows, with the
+active grid's stepped outline.
 
 ## Sharing names
 
