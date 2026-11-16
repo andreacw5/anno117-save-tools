@@ -351,6 +351,11 @@ class TestXml(TempDirMixin, unittest.TestCase):
         with quiet():
             self.assertEqual(A.read_texts([f1, f2, bad]), {5: 'new'})
 
+    def test_read_texts_from_json(self):
+        xml = self.write('a.xml', '<T><Text><LineId>-7</LineId><Text>Navalia</Text></Text></T>')
+        js = self.write('t.json', '{"-7": "Navalia nuova", "9": "Trireme", "x": "ignored"}')
+        self.assertEqual(A.read_texts([xml, js]), {-7: 'Navalia nuova', 9: 'Trireme'})
+
     ASSETS = '''<AssetList><Groups><Group><Assets>
   <Asset>
     <Template>Ship</Template>

@@ -2117,8 +2117,13 @@ def read_assets(files):
     return assets
 
 def read_texts(files):
+    """LineId -> text from texts_<lang>.xml files, or from a JSON written by `assets --texts-out`
+    (works without the game installed)."""
     t = {}
     for f in files:
+        if f.lower().endswith('.json'):
+            t.update({int(k): v for k, v in read_json(f).items() if k.lstrip('-').isdigit()})
+            continue
         try:
             for _, el in ET.iterparse(f, events=('end',)):
                 if el.tag == 'Text':
@@ -2203,6 +2208,9 @@ def cmd_assets(a):
             out[str(g)] = x
     out = dict(sorted(out.items(), key=lambda kv: int(kv[0])))
     write_json(a.output, out, 1)
+    if getattr(a, 'texts_out', None):   # every text, so extract/report name cities and ships without the game
+        write_json(a.texts_out, {str(k): v for k, v in sorted(texts.items())}, None)
+        print(f'{len(texts)} {a.lang} texts written to {a.texts_out}')
     print(f'\n{len(out)} GUIDs written to {a.output} ({len(assets)} assets, {len(texts)} {a.lang} texts)')
 
 def cmd_list(a):
@@ -2583,6 +2591,8 @@ def main():
     s.add_argument('--lang', default='english', help='text language, as in texts_<lang>.xml (default english)')
     s.add_argument('--all', action='store_true', help='keep every asset (default: military, naval, participant, session, fertility, city status, production)')
     s.add_argument('--extract-dir', default='extracted', help='where to save the extracted .xml files')
+    s.add_argument('--texts-out', metavar='FILE', help='also write every text of --lang as a JSON file, '
+                   'usable with --texts in place of texts_<lang>.xml (no game needed)')
     l = sub.add_parser('list', help='list files inside .rda archives')
     l.add_argument('path'); l.add_argument('filter', nargs='?')
     t = sub.add_parser('guid-table', help='GUID map -> Markdown table')

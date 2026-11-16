@@ -54,6 +54,9 @@ Language archives such as `en_us0.rda` only hold voice-over sound banks; they ar
    Without `--all`, only naval, military, participant, session, fertility, city status,
    production, house and need assets are kept.
 4. `extract` then picks `guid_names.json` up automatically (`--names` to point elsewhere).
+5. With `--texts-out FILE`, `assets` also writes every text of `--lang` as one JSON object
+   (`{"LineId": "text"}`). Pass it to `--texts` instead of `texts_<lang>.xml`: default city names
+   and ship names then resolve without the game installed.
 
 You can also point `assets` at a folder of `.xml` files already extracted with another tool,
 such as RDAExplorer.
