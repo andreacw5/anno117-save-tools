@@ -590,6 +590,16 @@ class TestRouteFlows(unittest.TestCase):
         self.assertEqual(route_ship['custom_name'], 'Annona I')
         self.assertNotIn('custom_name', results[0]['participants'][0]['ships'][0]['ships'][1])
 
+    def test_cross_province_legs_and_border(self):
+        routes = [{'owner': 41, 'stations': [{'area': 1, 'session': 'nile', 'city': 'Memphis'},
+                                             {'area': 9, 'session': 'latium', 'city': 'Cinis'}]},
+                  {'owner': 41, 'stations': [{'area': 1, 'session': 'nile'}, {'area': 2, 'session': 'nile'}]},
+                  {'owner': 7, 'stations': [{'area': 1, 'session': 'nile'}, {'area': 9, 'session': 'latium'}]}]
+        legs = A.cross_legs(routes, 'nile', {1: (100, 100), 2: (500, 500)}, {41})
+        self.assertEqual(legs, {(1, 'latium', 41): ['Cinis']})
+        self.assertEqual(A.edge_point(100, 950, 1000), (100, 1000))
+        self.assertEqual(A.edge_point(30, 500, 1000), (0, 500))
+
     def test_history_records_ship_steps(self):
         n = lambda name, value=None, kids=(): setattr(x := A.Node(name, value), 'children', list(kids)) or x
         pts = [100, 99, 49, 48, 98, 97]               # a ship loads 50, another unloads 50

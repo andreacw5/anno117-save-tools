@@ -2147,6 +2147,21 @@ def compose_terrain(tiles):
         im.paste(img, (x, H - z - S), alpha)
     return im
 
+def cross_legs(routes, label, centers, humans):
+    """Human routes that leave this province: {(local area, other province, owner): [other cities]}."""
+    out = collections.defaultdict(set)
+    for rt in routes:
+        if rt['owner'] not in humans: continue
+        here = [st['area'] for st in rt['stations'] if st['session'] == label and st['area'] in centers]
+        away = [st for st in rt['stations'] if st['session'] and st['session'] != label]
+        for p in here:
+            for st in away: out[(p, st['session'], rt['owner'])].add(st.get('city') or f"area {st['area']}")
+    return {k: sorted(v) for k, v in out.items()}
+
+def edge_point(x, y, H):
+    """Nearest point on the border of an H x H image."""
+    return min([(0, y), (H, y), (x, 0), (x, H)], key=lambda q: math.dist((x, y), q))
+
 def cmd_map(a):
     try:
         from PIL import Image, ImageDraw, ImageFont
@@ -2232,7 +2247,8 @@ def cmd_map(a):
         attach_routes(results, trade_routes(data_root), ships, names, gmap)
         centers = {e['area']: e['center'] for e in area_list if 'center' in e}
         legs = collections.Counter()
-        for rt in next(r for r in results if r['session'] == label).get('trade_routes', []):
+        here_routes = next(r for r in results if r['session'] == label).get('trade_routes', [])
+        for rt in here_routes:
             if rt['owner'] not in humans: continue
             stops = [st['area'] for st in rt['stations'] if st['session'] == label and st['area'] in centers]
             for i in range(len(stops) - 1 if len(stops) <= 2 else len(stops)):   # routes are loops
@@ -2252,6 +2268,18 @@ def cmd_map(a):
             w = 3 + min(n, 4)                                          # busier legs are thicker
             dashed(pa, qa, (0, 0, 0), w + 3)
             dashed(pa, qa, color.get(owner, (255, 215, 0)), w)
+        # routes to other provinces: a leg to the nearest map border, labelled with where they go
+        lf = font(max(12, H // 110))
+        for (p, other, owner), cities in sorted(cross_legs(here_routes, label, centers, humans).items()):
+            pa = (centers[p][0], H - centers[p][1]); qa = edge_point(*pa, H)
+            c = color.get(owner, (255, 215, 0))
+            dashed(pa, qa, (0, 0, 0), 6, dash=8, gap=10)
+            dashed(pa, qa, c, 3, dash=8, gap=10)
+            m = max(10, H // 60)                                       # keep the text inside the image
+            tx, ty = min(max(qa[0], m), H - m), min(max(qa[1], m), H - m)
+            anchor = ('l' if qa[0] == 0 else 'r' if qa[0] == H else 'm') + ('t' if qa[1] == 0 else 'b' if qa[1] == H else 'm')
+            d.text((tx, ty), f"{other.capitalize()}: {', '.join(cities)}", font=lf, fill=c, anchor=anchor,
+                   stroke_width=3, stroke_fill=(0, 0, 0))
     draw_order = {'civil': 0, 'unit': 1, 'warship': 2}                # warships on top
     k = max(1.0, H / max(a.width or 1600, 1))                          # icon scale: same size after resizing
     for kind, o, aid, x, z in sorted((ob for ob in objs if ob[0] in draw_order), key=lambda ob: draw_order[ob[0]]):
