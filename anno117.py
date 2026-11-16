@@ -1108,8 +1108,9 @@ def report_data(cur, prev, humans, horizon=60, _inner=False):
                                                    -sum(order[i['level']] < 2 for i in g['items'])))
     return {'save': cur[0].get('save'), 'previous': (prev or [{}])[0].get('save'), 'resolved': resolved,
             'horizon': horizon, 'alarms': alarms, 'groups': cards, 'sections': sections, 'drains': sorted(drains, key=lambda d: d['mins']),
-            'hostile': sorted({p['name'] for r in cur for p in r['participants']
-                               if p['name'] and kinds.get(str(p['participant'])) == 'pirate'}),
+            'hostile': sorted({n for r in cur for o, n in [(p['participant'], p['name']) for p in r['participants']]
+                               + [(e.get('owner'), e.get('owner_name')) for e in r['areas']]
+                               if n and kinds.get(str(o)) == 'pirate'}),   # a pirate may only own an island
             'islands': [] if _inner else island_views(cur, prev, humans, alarms)}
 
 def hints(card, seen=None):
@@ -1172,7 +1173,7 @@ HTML_STYLE = """
 :root[data-theme=light]{--ground:#ebe4d6;--slab:#f7f2e8;--slab-2:#e2d9c7;--rule:#cfc3ad;--ink:#211b12;--ink-2:#5c5243;
 --ink-3:#756a58;--ochre:#8c5f12;--ochre-ink:#fff8ea;--high:#a8291b;--high-bg:#f6dcd5;--medium:#8a5d00;--medium-bg:#f5e7c4;
 --info:#2d5a9e;--info-bg:#e1eaf7;--new:#1f7a5c;color-scheme:light}
-*{box-sizing:border-box}html{scroll-padding-top:100px;scrollbar-color:var(--rule) var(--ground)}
+*{box-sizing:border-box}[hidden]{display:none!important}html{scroll-padding-top:100px;scrollbar-color:var(--rule) var(--ground)}
 body{margin:0;background:var(--ground);color:var(--ink);font:14px/1.45 var(--text);font-variant-numeric:tabular-nums}
 ::selection{background:var(--ochre);color:var(--ochre-ink)}
 :focus-visible{outline:2px solid var(--ochre);outline-offset:2px;border-radius:3px}
@@ -1286,7 +1287,7 @@ footer{color:var(--ink-3);font-size:12px;border-top:1px solid var(--rule);paddin
 kbd{font:11px var(--text);border:1px solid var(--rule);border-radius:3px;padding:0 4px;color:var(--ink-2)}
 @media (max-width:640px){.row{grid-template-columns:68px minmax(0,1fr)}.gauge{grid-column:2;justify-items:start;width:100%}
 .when{font-size:21px}.chips+.chips{padding-left:0;border-left:0}.save{max-width:100%}}
-@media (prefers-reduced-motion:no-preference){.pin .lbl,button{transition:color .15s,background-color .15s,border-color .15s}}
+@media (prefers-reduced-motion:no-preference){button:not(.place):hover{transition:color .15s,border-color .15s}}
 """
 
 HTML_SCRIPT = r"""
@@ -1520,10 +1521,10 @@ def render_html(rep, images, stamp=None):
     if minor:
         out.append('<details class="minor" id="minor"><summary></summary><div class="rows">' + ''.join(minor) + '</div></details>')
     if empty:
-        out.append('<p class="gt">Already empty</p><ul class="list">' + ''.join(
+        out.append('<div class="group"><p class="gt">Already empty</p><ul class="list">' + ''.join(
             f'<li class="item" data-level="{a["level"]}" data-prov="{h(" ".join(a["provs"]))}" data-new="{int(bool(a.get("new")))}">'
             f'<span>{place(a["place"])}{new_tag if a.get("new") else ""} {h(a["text"])}'
-            f'<span class="sub">{h(a["hint"])}</span></span></li>' for a in empty) + '</ul>')
+            f'<span class="sub">{h(a["hint"])}</span></span></li>' for a in empty) + '</ul></div>')
     out.append(f'<p class="muted" id="dry-none" hidden>Nothing runs dry in the next {hz:g} minutes with the current filters.</p></section>')
 
     # ---- since the last save / needs a hand
@@ -1536,7 +1537,8 @@ def render_html(rep, images, stamp=None):
         out.append(f'<div class="tally"><div><strong>{nnew}</strong><span>new alarms</span></div>'
                    f'<div><strong class="up">{rep.get("resolved", 0)}</strong><span>resolved</span></div>'
                    f'<div><strong class="{"up" if dpop >= 0 else "dn"}">{round(dpop):+,}</strong><span>residents</span></div>'
-                   f'<div><strong class="{"up" if dinc >= 0 else "dn"}">{round(dinc):+,}</strong><span>income / min</span></div></div>')
+                   f'<div><strong class="{"up" if dinc >= 0 else "dn"}">{round(dinc):+,}</strong><span>income / min</span></div></div>'
+                   '<p class="muted" style="margin:-6px 0 12px">Totals for all provinces; the list below follows the filter.</p>')
         order = {'high': 0, 'medium': 1, 'info': 2}
         chg = sorted((a for a in rep['alarms'] if a.get('new') or a['vs_prev']), key=lambda a: order[a['level']])
         out.append('<ul class="list" id="changes">' + ''.join(
