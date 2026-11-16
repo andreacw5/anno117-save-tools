@@ -262,8 +262,8 @@ tell either (`"Flax Por - Aer"` carries flax *from* Aer *to* Por).
 loading takes a whole cargo between two 10 s samples, unloading adds one. Steps of 15 or more are
 summed per good as `stock_trends.loaded` and `unloaded`; on a route, a good goes **from** the stops
 where it was loaded **to** the others (unloads are not used for this: the cargo may have come by
-another route). In one save, bread on *Bread Mem - Cin* showed -51 and -46
-at Memphis and +47 and +43 at Cinis. Goods that no ship moved in the last 20 minutes fall back to
+another route). In one save, bread on a two-stop route showed -51 and -46
+at the producing city and +47 and +43 at the receiving one. Goods that no ship moved in the last 20 minutes fall back to
 production capacity: they go **from** the stop whose buildings can make the most of them
 (`output_capacity`, every production building at 100%, so farms idle at save time still count)
 **to** the route's other stops; that guess can be wrong when a large city also makes the good. Each area gets `supplies` and `receives`, `{good: [cities]}`, which shows at a glance
