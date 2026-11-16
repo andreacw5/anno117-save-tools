@@ -151,6 +151,9 @@ when missing, the default is `FactoryBase/CycleTime` in `export/properties.xml`,
 stores it as `factory` and `extract` computes, per area:
 
 - `population` and `residents` (by house type);
+- `needs`: per good or service asked for by the house types present (from the `needs` that
+  `assets` writes), its `category`, the `houses` asking for it, `kind` (`good` or `service`) and
+  `buff_only`;
 - `production`: per building type, `count`, `working` (cycle in progress), mean `productivity`,
   `output_per_minute` and `input_per_minute` = amount × 60 / cycle time × productivity;
 - `output_capacity`: what the area's production buildings make per minute at 100% productivity;
@@ -158,7 +161,7 @@ stores it as `factory` and `extract` computes, per area:
   icons the game shows over them (`Infolayer/Icons/t1/GUID`, template `InfoLayerIcon`), such as
   "StorageFull" (nobody collects the output), "missing goods", a paused building or, on the Nile,
   the flood and harvest seasons;
-- `idle_output_full` (per area): how many idle buildings carry the StorageFull icon (GUID 2001976),
+- `idle_output_full` (per building type and per area): how many idle buildings carry the StorageFull icon (GUID 2001976),
   i.e. overproduction; `idle_other_reasons`: the idle buildings without it, by icons;
 - `workforce_saturation`: `AreaWorkforceManager/DeltaStorage`, per workforce type the share of
   demand that is met (1.0 = every building has its workers);
@@ -255,9 +258,15 @@ several sessions, the station goes to the session of the route's ships. Each rou
 **not decoded**: `Amount` is the value set for that good at that stop, and the route name does not
 tell either (`"Flax Por - Aer"` carries flax *from* Aer *to* Por).
 
-`extract` therefore infers the direction from production capacity: a good set at a stop goes
-**from** the stop whose buildings can make the most of it (`output_capacity`, every production
-building at 100%, so farms idle at save time still count) **to** the route's other stops. Each area gets `supplies` and `receives`, `{good: [cities]}`, which shows at a glance
+`extract` therefore reads the direction from the warehouse history (`StorageTrends`): a ship
+loading takes a whole cargo between two 10 s samples, unloading adds one. Steps of 15 or more are
+summed per good as `stock_trends.loaded` and `unloaded`; on a route, a good goes **from** the stops
+where it was loaded **to** the others (unloads are not used for this: the cargo may have come by
+another route). In one save, bread on *Bread Mem - Cin* showed -51 and -46
+at Memphis and +47 and +43 at Cinis. Goods that no ship moved in the last 20 minutes fall back to
+production capacity: they go **from** the stop whose buildings can make the most of them
+(`output_capacity`, every production building at 100%, so farms idle at save time still count)
+**to** the route's other stops; that guess can be wrong when a large city also makes the good. Each area gets `supplies` and `receives`, `{good: [cities]}`, which shows at a glance
 what small supply islands are for.
 
 ## 7. What cannot be read from the save alone
@@ -267,7 +276,8 @@ what small supply islands are for.
 - **Renamed cities.** Default city and ship names resolve through `texts_<lang>.xml`; typed city names are inferred (see above).
   Trade route names (`RouteName`), however, are plain UTF-16 text and contain the first three
   letters of each city (for example `Hemp Kan - Mem`).
-- Residents' consumption per minute, load/unload direction on trade routes.
+- Residents' consumption per minute. Load/unload direction on trade routes is not stored; it is
+  read from the warehouse history when ships moved the good in the last 20 minutes.
 
 ## 8. Known limits of `extract`
 

@@ -471,6 +471,27 @@ class TestRegressions(TempDirMixin, unittest.TestCase):
         self.assertEqual(m['11']['factory'], {'in': {'1': 2}, 'out': {'2': 0.5}, 'cycle': '20'})
         self.assertEqual(m['12']['factory'], {'out': {'3': 1}, 'cycle': '30'})   # not the 7 of <Other>
 
+    def test_residence_needs(self):
+        xml = ('<AssetList><Asset><Template>ResidenceBuilding</Template><Values><Standard><GUID>30</GUID></Standard>'
+               '<Residence7><NeedsList><Item><Need>40</Need><NeedConsumptionRate>0.02</NeedConsumptionRate></Item>'
+               '<Item><Need>41</Need></Item><Item><Need>42</Need><NeedConsumptionRate>0.01</NeedConsumptionRate>'
+               '<IsOnlyAvailableThroughBuff>1</IsOnlyAvailableThroughBuff></Item></NeedsList></Residence7></Values></Asset>'
+               '<Asset><BaseAssetGUID>30</BaseAssetGUID><Values><Standard><GUID>31</GUID></Standard></Values></Asset>'
+               '<Asset><Template>Need</Template><Values><Standard><GUID>40</GUID><Name>Need Roman Food Fish</Name></Standard>'
+               '<Need><NeedProduct>50</NeedProduct><NeedCategoryType>Food</NeedCategoryType></Need></Values></Asset>'
+               '<Asset><Template>Need</Template><Values><Standard><GUID>41</GUID><Name>Need Roman Celtic Public Market</Name>'
+               '</Standard><Need><NeedProduct>51</NeedProduct></Need></Values></Asset>'
+               '<Asset><Template>Need</Template><Values><Standard><GUID>42</GUID><Name>Need Roman Food Bread</Name></Standard>'
+               '<Need><NeedProduct>52</NeedProduct><NeedCategoryType>Food</NeedCategoryType></Need></Values></Asset>'
+               '</AssetList>')
+        m = self.assets_run(xml, '<Properties/>')
+        needs = {n['product']: n for n in m['30']['needs']}
+        self.assertEqual(needs['50'], {'need': '40', 'rate': '0.02', 'product': '50', 'category': 'Food'})
+        self.assertEqual(needs['51']['category'], 'Public')           # from the name: culture words skipped
+        self.assertNotIn('rate', needs['51'])                         # a service, not a good
+        self.assertTrue(needs['52']['buff_only'])
+        self.assertEqual(m['31']['needs'], m['30']['needs'])         # inherited from the base asset
+
     def test_num(self):
         self.assertEqual([A.num('3'), A.num('0.5'), A.num('2.0'), A.num(None, 1), A.num('x', 1)], [3, 0.5, 2, 1, 1])
 
@@ -530,6 +551,27 @@ class TestRouteFlows(unittest.TestCase):
         self.assertEqual(hub['receives'], {'Flax': ['Aeretia'], 'Sheep': ['Aeretia']})
         self.assertNotIn('supplies', hub)
         self.assertEqual(results[0]['trade_routes'][0]['stations'][0]['city'], 'Portus')
+
+    def test_ship_loads_seen_in_the_history_win_over_capacity(self):
+        # the capital bakes more bread, but the history shows ships loading it at the small city
+        cap = {'area': 1, 'owner': 41, 'city': 'Cinis', 'output_capacity': {'Bread': 20.0},
+               'stock_trends': {'Bread': {'loaded': 0, 'unloaded': 90}}}
+        small = {'area': 2, 'owner': 41, 'city': 'Memphis', 'output_capacity': {'Bread': 4.0},
+                 'stock_trends': {'Bread': {'loaded': 97, 'unloaded': 0}}}
+        results = [{'session': 'x', 'areas': [cap, small]}]
+        routes = [{'id': 1, 'name': 'Bread Mem - Cin', 'owner': 41, 'ships': [],
+                   'stations': [{'area': 2, 'goods': {10: 50}}, {'area': 1, 'goods': {10: 50}}]}]
+        A.attach_routes(results, routes, {}, {41: 'Me'}, {10: 'Bread'})
+        self.assertEqual(small['supplies'], {'Bread': ['Cinis']})
+        self.assertEqual(cap['receives'], {'Bread': ['Memphis']})
+
+    def test_history_records_ship_steps(self):
+        n = lambda name, value=None, kids=(): setattr(x := A.Node(name, value), 'children', list(kids)) or x
+        pts = [100, 99, 49, 48, 98, 97]               # a ship loads 50, another unloads 50
+        tr = n('StorageTrends', None, [n('a8000', struct.pack('<I', 5)), n('t1', None, [n('Points', None,
+               [n('a8000', struct.pack('<I', v)) for v in pts])])])
+        t = A.stock_history(tr)[5]
+        self.assertEqual((t['loaded'], t['unloaded']), (50, 50))
 
 
 class TestEconomyStatus(unittest.TestCase):
@@ -642,7 +684,7 @@ class TestReport(TempDirMixin, unittest.TestCase):
         self.assertIn('Plebs: only 50%', text)
         self.assertIn('overproduction: 2 of 4 production buildings idle', text)
         self.assertIn('3 production buildings stopped: Missing ×3', text)
-        self.assertIn('info Wine Ost - Rom: Wine at Roma (449): already at its storage limit', text)
+        self.assertIn('info Wine Ost - Rom: 1 good already at the storage limit: Wine at Roma (449)', text)
         self.assertIn('population fell from 2,000 to 1,000', text)
         self.assertIn('no ships assigned', text)
         self.assertIn('none of its goods (Fish)', text)
@@ -661,7 +703,7 @@ class TestReport(TempDirMixin, unittest.TestCase):
         cards = {(g['kind'], g['place']): g for g in rep['groups']}
         self.assertEqual(cards[('route', 'Empty')]['detail'], 'Roma · 0 ships')
         self.assertEqual(cards[('island', 'Roma (latium)')]['level'], 'high')
-        self.assertIn('nothing brings it here', cards[('island', 'Roma (latium)')]['items'][0]['hint'])
+        self.assertIn('nothing brings it here: add a route or build production', [i['hint'] for i in cards[('island', 'Roma (latium)')]['items']])
         self.assertEqual(rep['groups'][0]['level'], 'high')
 
     def test_lost_island_and_no_previous(self):
@@ -686,10 +728,37 @@ class TestReport(TempDirMixin, unittest.TestCase):
         A.write_json(os.path.join(d, 'latium.json'), self.session(), 2)
         out = os.path.join(self.tmp, 'r.html')
         args = A.argparse.Namespace(current=d, compare=d, output=out, md=out + '.md', maps=None, player=None,
-                                    horizon=60, names=None, texts=None, city_names=None, radius=40)
+                                    horizon=60, names=None, texts=None, city_names=None, radius=40, stale=45)
         with quiet(): A.cmd_report(args)
         self.assertTrue(os.path.getsize(out) > 1000)
         with open(out + '.md', encoding='utf-8') as f: self.assertIn('Compared with', f.read())
+        with open(out + '.stamp.js', encoding='utf-8') as f: stamp = f.read()      # the open page polls it
+        with open(out, encoding='utf-8') as f: page = f.read()
+        build = stamp.split('"')[1]
+        self.assertIn(f'"build": "{build}"', page)
+        self.assertIn('"stamp": "r.html.stamp.js"', page)
+        self.assertFalse(os.path.exists(out + '.tmp'))
+
+    def test_new_and_resolved(self):
+        old = self.session()
+        old['areas'][0]['workforce_saturation'] = {'Plebs': 1.0}           # no workforce alarm before
+        old['areas'][0]['idle_other_reasons'] = {}
+        old['trade_routes'] = old['trade_routes'][1:]                        # the empty route did not exist
+        old['areas'][0]['storage']['Bread'] = 7                               # same alarm, other numbers
+        rep = A.report_data([self.session()], [old], {41})
+        new = {a['text'].split(':')[0] for a in rep['alarms'] if a.get('new')}
+        self.assertIn('Plebs', new)
+        self.assertIn('no ships assigned', new)
+        self.assertNotIn('Bread', new)                                       # numbers changed, still the same alarm
+        rep = A.report_data([old], [self.session()], {41})
+        self.assertGreaterEqual(rep['resolved'], 3)
+        self.assertEqual(rep['groups'][0]['provs'], ['latium'])
+
+    def test_html_controls(self):
+        page = A.render_html(A.report_data([self.session()], None, {41}), {})
+        for needle in ('class="bar"', 'data-level="high"', 'data-prov="latium"', 'id="theme"', 'localStorage'):
+            self.assertIn(needle, page)
+        self.assertIn('data-theme="dark"', page)
 
 
 if __name__ == '__main__':
@@ -726,3 +795,35 @@ class TestReportRoutes(unittest.TestCase):
         page = A.render_md(A.report_data([r], None, {41}))
         self.assertNotIn('Trader', page)
         self.assertIn('Rival', page)
+
+
+class TestIslandView(unittest.TestCase):
+    def test_needs_and_flows(self):
+        f32 = lambda v: struct.pack('<f', v)
+        n = lambda name, value=None, kids=(): setattr(x := A.Node(name, value), 'children', list(kids)) or x
+        house = n('t1', None, [n('guid', struct.pack('<I', 30)), n('Building'),
+                               n('Residence7', None, [n('ResidentCount', f32(10))])])
+        info = {30: {'needs': [{'need': '40', 'rate': '0.02', 'product': '50', 'category': 'Food'},
+                               {'need': '41', 'product': '51', 'category': 'Public'}]}}
+        names = {30: 'House', 50: 'Fish', 51: 'Market', 52: 'Bread'}
+        res = A.economy([house], lambda g: names.get(g, str(g)), info)
+        self.assertEqual(res['needs'], {'Fish': {'category': 'Food', 'houses': ['House'], 'kind': 'good'},
+                                        'Market': {'category': 'Public', 'houses': ['House'], 'kind': 'service'}})
+        area = {'area': 1, 'owner': 41, 'city': 'Roma', 'population': 10, 'needs': res['needs'],
+                'storage': {}, 'receives': {'Fish': ['Ostia']}, 'supplies': {'Bread': ['Capua']},
+                'production': [{'building': 'Bakery', 'count': 4, 'idle_output_full': 3,
+                                'capacity_per_minute': {'Bread': 2.0}}]}
+        isl = A.island_views([{'session': 'x', 'areas': [area]}], None, {41}, [])[0]
+        t = {x['title']: x for x in isl['tables']}
+        self.assertEqual(isl['label'], 'Roma (x)')
+        rows = {r[0]: r for r in t["Residents' needs"]['rows']}
+        self.assertEqual(rows['Fish'][1], 'out of stock')          # shipped in, but none left
+        self.assertEqual(rows['Market'][1], 'not built')
+        self.assertEqual(t['Overproduced']['rows'][0][1], ('3 / 4', 3))
+        self.assertEqual(t['Exported']['rows'][0][-1], 'Capua')
+        self.assertEqual(t['Imported']['rows'][0][-1], 'Ostia')
+        rep = {'save': 's', 'previous': None, 'alarms': [], 'groups': [], 'sections': [], 'islands': [isl]}
+        page = A.render_html(rep, {})
+        self.assertIn('<select id="isl"', page)
+        self.assertIn('data-id="x-1"', page)
+        self.assertIn('### Roma (x)', A.render_md(rep))

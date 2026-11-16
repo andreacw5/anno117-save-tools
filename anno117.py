@@ -395,6 +395,7 @@ def load_info(paths):
                 if k.isdigit() and isinstance(v, dict): m[int(k)] = v
     return m
 
+SHIP_STEP = 15          # a stock change this big between two samples is a ship loading / unloading
 ICON_STORAGE_FULL = 2001976   # InfoLayerIcon "StorageFull": the building's output is not collected
 TREND_STEP_S = 10  # StorageTrends samples every 10 game seconds (two saves 180 s apart: series shifted by 18)
 
@@ -412,7 +413,9 @@ def stock_history(tr):
         out[u(k.value)] = {'net_per_minute': round((pts[-1] - pts[0]) / minutes, 2),
                            'outflow_per_minute': round(-sum(s for s in steps if s < 0) / minutes, 2),
                            'inflow_per_minute': round(sum(s for s in steps if s > 0) / minutes, 2),
-                           'max': max(pts), 'first': pts[0], 'last': pts[-1], 'minutes': round(minutes, 1)}
+                           'max': max(pts), 'first': pts[0], 'last': pts[-1], 'minutes': round(minutes, 1),
+                           # a ship loading or unloading moves a whole cargo within one 10 s sample
+                           'loaded': -sum(x for x in steps if x <= -SHIP_STEP), 'unloaded': sum(x for x in steps if x >= SHIP_STEP)}
     return out
 
 def storage_limits(peaks):
@@ -472,6 +475,19 @@ def economy(objs, name, info):
     if residents:
         res['population'] = round(sum(residents.values()))
         res['residents'] = {name(g): round(n) for g, n in residents.most_common()}
+        needs = {}                      # good or service -> who asks for it (from the game's NeedsList)
+        for g in residents:
+            for nd in (info.get(g) or {}).get('needs', []):
+                pr = nd.get('product')
+                if not str(pr or '').isdigit(): continue
+                x = needs.setdefault(name(int(pr)), {'category': nd.get('category'), 'houses': [],
+                                                     'kind': 'good' if nd.get('rate') else 'service'})
+                if name(g) not in x['houses']: x['houses'].append(name(g))
+                x['buff_only'] = x.get('buff_only', True) and bool(nd.get('buff_only'))   # for every house asking
+        for x in needs.values():
+            if not x.pop('buff_only'): continue
+            x['buff_only'] = True
+        if needs: res['needs'] = needs
     if fac:
         rows, net, cap, idle, full = [], collections.Counter(), collections.Counter(), collections.Counter(), 0
         other = collections.Counter()
@@ -482,6 +498,7 @@ def economy(objs, name, info):
             if x['in']: row['input_per_minute'] = {name(k): round(v, 2) for k, v in x['in'].items()}
             if x['cap']: row['capacity_per_minute'] = {name(k): round(v, 2) for k, v in x['cap'].items()}
             if x['idle']: row['idle_reasons'] = dict(x['idle'].most_common())
+            if x['full']: row['idle_output_full'] = x['full']
             rows.append(row)
             idle.update(x['idle']); full += x['full']; other.update(x['other'])
             cap.update(x['cap'])
@@ -596,9 +613,11 @@ def attach_routes(results, routes, ships, names, gmap):
     """Name each route's ships and stations and add it to every session it stops in.
     Area ids are only unique within a session: a station goes to the session of the route's
     ships when its id exists in several.
-    Also fills each area's `supplies` / `receives` ({good: [cities]}): the save does not say which
-    stop loads a good, so a good goes *from* the stop with the largest production capacity for it
-    (output_capacity: its buildings at 100%, so idle farms still count) *to* the route's other stops."""
+    Also fills each area's `supplies` / `receives` ({good: [cities]}). The route itself does not say
+    which stop loads a good; the warehouse history does: a ship loading takes a whole cargo within one
+    sample (`stock_trends.loaded`), unloading adds one (`unloaded`). Goods no ship moved in the last
+    20 minutes go *from* the stop with the largest production capacity for them (output_capacity:
+    its buildings at 100%, so idle farms still count) *to* the other stops."""
     by_area = collections.defaultdict(list)
     for r in results:
         for e in r['areas']: by_area[e['area']].append((r['session'], e))
@@ -637,12 +656,18 @@ def attach_routes(results, routes, ships, names, gmap):
         for r in results:                   # no station resolved: show it where its ships are
             if r['session'] in (where or ship_sessions): r.setdefault('trade_routes', []).append(row)
         capacity = lambda e, g: (e.get('output_capacity') or {}).get(g, 0)
-        for e, goods in visited:
-            for g in goods:
+        moved = lambda e, g, k: ((e.get('stock_trends') or {}).get(g) or {}).get(k, 0)
+        for g in sorted({g for _, goods in visited for g in goods}):
+            stops_g = [e for e, goods in visited if g in goods]
+            loads = [e for e in stops_g if moved(e, g, 'loaded') and not moved(e, g, 'unloaded')]
+            if loads:                       # seen in the warehouse history: ships took a cargo here
+                srcs = loads                # (unloads are not used: they may come from another route)
+            else:                           # nothing loaded in the last 20 minutes: largest producer
                 best_cap = max(capacity(x, g) for x, _ in visited)
-                if best_cap <= 0 or capacity(e, g) < best_cap: continue
-                for e2, _ in visited:
-                    if e2 is e: continue
+                srcs = [e for e, _ in visited if best_cap > 0 and capacity(e, g) >= best_cap]
+            dests = [e for e in stops_g if e not in srcs] or [e for e, _ in visited if e not in srcs]
+            for e in srcs:
+                for e2 in dests:
                     flows[id(e)]['supplies'][g].add(city(e2))
                     flows[id(e2)]['receives'][g].add(city(e))
     for k, f in flows.items():
@@ -758,15 +783,94 @@ def force_cells(p, old):
     o = [None] * 3 if old is None else forces(old) if old else [0, 0, 0]
     return [cell(v, ov) if v is not None else ('', None) for v, ov in zip(f, o)]
 
-def report_data(cur, prev, humans, horizon=60):
+def island_views(cur, prev, humans, alarms):
+    """One panel per island of the human players: what is short, what the residents ask for, what is
+    overproduced, what is shipped out and brought in. Built from the same data as the alarms."""
+    old = {(r['session'], e['area']): e for r in prev or [] for e in r['areas']}
+    by_place = collections.defaultdict(list)
+    for a in alarms:
+        if a['kind'] == 'island': by_place[a['place']].append(a)
+    out = []
+    for r in cur:
+        label = r['session']
+        for e in sorted((e for e in r['areas'] if e.get('owner') in humans), key=lambda e: -(e.get('population') or 0)):
+            place, pe = f'{city_of(e)} ({label})', old.get((label, e['area'])) or {}
+            st, tr, made = e.get('storage') or {}, e.get('stock_trends') or {}, e.get('output_capacity') or {}
+            lims, ost = e.get('storage_limits_estimate') or [], pe.get('storage') or {}
+            sup, rec, built = e.get('supplies') or {}, e.get('receives') or {}, e.get('buildings') or {}
+            stock = lambda g: cell(st.get(g, 0), ost.get(g, 0) if prev else None)
+            trend = lambda g: cell((tr.get(g) or {}).get('net_per_minute'), nd=2)
+            full = lambda g: at_limit(st.get(g, 0), tr.get(g), lims)
+            wf = e.get('workforce_saturation') or {}
+            facts = [x for x in (e.get('city_status'),
+                                 f"{e['population']:,} residents" if e.get('population') else None,
+                                 f"income {e['income_per_minute']:,}/min" if e.get('income_per_minute') is not None else None,
+                                 f"workforce {min(wf.values()):.0%}" if wf else None) if x]
+            if e.get('residents'):
+                facts.append(', '.join(f'{k} {v:,}' for k, v in e['residents'].items()))
+            tables = []
+            # residents' needs: is each good stocked, made here or brought in; is each service built
+            rows = []
+            for g, nd in sorted((e.get('needs') or {}).items(), key=lambda kv: (kv[1].get('kind') != 'good',
+                                                                                 kv[1].get('category') or '', kv[0])):
+                if nd.get('kind') == 'service':
+                    ok = g in built
+                    rows.append([g, 'ok' if ok else 'not built', ('', None), ('', None),
+                                 'built here' if ok else 'not built here', nd.get('category') or '', ', '.join(nd['houses'])])
+                    continue
+                src = ('produced here' if made.get(g) else '') + (
+                    ('; ' if made.get(g) else '') + 'from ' + ', '.join(rec[g]) if rec.get(g) else '')
+                t, n = tr.get(g) or {}, st.get(g, 0)
+                supplied = made.get(g) or rec.get(g)
+                state = ('out of stock' if not n and supplied else 'not supplied' if not n
+                         else 'running low' if t.get('net_per_minute', 0) < 0 and t.get('first', n) - n >= 10
+                         else 'at limit' if full(g) else 'ok')
+                rows.append([g + (' (buff only)' if nd.get('buff_only') else ''), state, stock(g), trend(g),
+                             src or 'nobody brings it', nd.get('category') or '', ', '.join(nd['houses'])])
+            rank = {'out of stock': 0, 'running low': 1, 'not built': 2, 'not supplied': 3, 'ok': 4, 'at limit': 5}
+            rows.sort(key=lambda x: rank.get(x[1], 9))
+            if rows:
+                tables.append({'title': "Residents' needs", 'rows': rows,
+                               'headers': ['Need', 'State', 'Stock', 'Trend/min', 'Supply', 'Category', 'For'],
+                               'note': 'From the game\'s needs list of each house type present, which also holds '
+                                       'optional needs and needs not unlocked yet: "not supplied" may be fine, '
+                                       '"out of stock" (made here or shipped in, but none left) is not. Amounts per '
+                                       'minute are not shown (their unit is not confirmed).'})
+            # overproduction: building types idle because their output is not collected
+            rows = []
+            for row in e.get('production', []):
+                if not row.get('idle_output_full'): continue
+                outs = row.get('capacity_per_minute') or {}
+                rows.append([row['building'], (f"{row['idle_output_full']} / {row['count']}", row['idle_output_full']),
+                             ', '.join(f'{g} {v:g}/min' for g, v in outs.items()),
+                             ', '.join(f'{g} {st.get(g, 0)}' + (' (limit)' if full(g) else '') for g in outs),
+                             ', '.join(sorted({c for g in outs for c in sup.get(g, [])})) or 'not shipped'])
+            if rows:
+                rows.sort(key=lambda x: -x[1][1])
+                tables.append({'title': 'Overproduced', 'rows': rows,
+                               'headers': ['Building', 'Idle (output full)', 'Makes at 100%', 'Stock', 'Shipped to'],
+                               'note': 'Buildings stopped because nobody collects their output: pause some, or '
+                                       'ship the goods where they are needed.'})
+            for title, flows, who in (('Exported', sup, 'To'), ('Imported', rec, 'From')):
+                rows = [[g, ('at limit' if full(g) else 'out of stock' if not st.get(g) else ''), stock(g), trend(g),
+                         ', '.join(c)] for g, c in sorted(flows.items())]
+                if rows:
+                    tables.append({'title': title, 'rows': rows, 'headers': ['Good', 'State', 'Stock', 'Trend/min', who]})
+            out.append({'id': f"{label}-{e['area']}", 'label': place, 'prov': label, 'facts': facts,
+                        'alarms': by_place.get(place, []), 'tables': tables})
+    return out
+
+def report_data(cur, prev, humans, horizon=60, _inner=False):
     """Alarms and tables of the report, as plain data (rendered as Markdown or HTML)."""
     prev_s = {r['session']: r for r in prev or []}
     alarms, sections, seen_routes = [], [], set()
     is_human = lambda o: o in humans
     kinds = {k: v for r in cur + (prev or []) for k, v in (r.get('participant_kinds') or {}).items()}
     npc = lambda o: kinds.get(str(o)) == 'npc'          # traders and envoys: left out of players and forces
-    def alarm(level, kind, place, text, hint='', key=None):
-        alarms.append({'level': level, 'kind': kind, 'place': place, 'key': key or place, 'text': text, 'hint': hint})
+    def alarm(level, kind, place, text, hint='', key=None, provs=(), vs_prev=False):
+        code = f"{kind}|{key or place}|{re.sub(r'[-+~0-9.,]+', '#', text)}"   # stable across saves: no numbers
+        alarms.append({'level': level, 'kind': kind, 'place': place, 'key': key or place, 'text': text, 'hint': hint,
+                       'code': code, 'provs': list(provs), 'vs_prev': vs_prev})   # vs_prev: a change between saves
     details = {}                                    # (kind, place) -> line under the place's name
     area_at = {(x['session'], e['area']): e for x in cur for e in x['areas']}
     for r in cur:
@@ -777,7 +881,8 @@ def report_data(cur, prev, humans, horizon=60):
         # ---- islands of the human players
         for e in mine:
             place, pe = f'{city_of(e)} ({label})', old_area.get(e['area'])
-            isl = lambda level, text, hint='', place=place: alarm(level, 'island', place, text, hint)
+            isl = lambda level, text, hint='', place=place, d=False: alarm(level, 'island', place, text, hint,
+                                                                          provs=[label], vs_prev=d)
             details[('island', place)] = ', '.join(x for x in (e.get('city_status'), f"{e['population']:,} residents"
                                                      if e.get('population') else None) if x)
             for wf, sat in (e.get('workforce_saturation') or {}).items():
@@ -810,16 +915,18 @@ def report_data(cur, prev, humans, horizon=60):
             if pe:
                 p0, p1 = pe.get('population') or 0, e.get('population') or 0
                 if p0 - p1 >= max(50, p0 * 0.02):
-                    isl('high', f'population fell from {p0:,} to {p1:,}', 'look for unmet needs or missing goods above')
+                    isl('high', f'population fell from {p0:,} to {p1:,}', 'look for unmet needs or missing goods above', d=True)
                 i0, i1 = pe.get('income_per_minute'), e.get('income_per_minute')
                 if i0 and i1 is not None and i0 - i1 > abs(i0) * 0.1:
-                    isl('medium', f'income fell from {i0:,} to {i1:,} per minute')
+                    isl('medium', f'income fell from {i0:,} to {i1:,} per minute', d=True)
         for e in r['areas']:
             pe = old_area.get(e['area'])
             if pe and is_human(pe.get('owner')) and not is_human(e.get('owner')):
-                alarm('high', 'island', f'{city_of(pe)} ({label})', f'lost: now owned by {e.get("owner_name") or "nobody"}')
+                alarm('high', 'island', f'{city_of(pe)} ({label})', f'lost: now owned by {e.get("owner_name") or "nobody"}',
+                      provs=[label], vs_prev=True)
             if pe and is_human(e.get('owner')) and not is_human(pe.get('owner')):
-                alarm('info', 'island', f'{city_of(e)} ({label})', f'new island, was {pe.get("owner_name") or "unowned"}')
+                alarm('info', 'island', f'{city_of(e)} ({label})', f'new island, was {pe.get("owner_name") or "unowned"}',
+                      provs=[label], vs_prev=True)
         # ---- trade routes of the human players
         routes = [rt for rt in r.get('trade_routes', []) if is_human(rt['owner'])]
         for rt in routes:
@@ -829,7 +936,8 @@ def report_data(cur, prev, humans, horizon=60):
             stops = [(st, area_at.get((st['session'], st['area']), {})) for st in rt['stations']]
             details[('route', key)] = (' → '.join(st['city'] or f"area {st['area']}" for st, _ in stops)
                                          + f' · {len(rt["ships"])} ship' + ('' if len(rt['ships']) == 1 else 's'))
-            ra = lambda level, text, hint='', place=place, key=key: alarm(level, 'route', place, text, hint, key)
+            rprov = sorted({st['session'] for st in rt['stations'] if st.get('session')})
+            ra = lambda level, text, hint='', place=place, key=key, rprov=rprov: alarm(level, 'route', place, text, hint, key, rprov)
             goods = sorted({g for st in rt['stations'] for g in st['goods']})
             if not rt['ships']: ra('high', 'no ships assigned', 'assign ships or delete the route')
             if not goods: ra('medium', 'no goods set at any stop', 'the ships sail empty: set goods or delete the route')
@@ -841,15 +949,18 @@ def report_data(cur, prev, humans, horizon=60):
                    'the ships carry nothing: fix the source or reuse the ships')
             elif dry:
                 ra('medium', f'{", ".join(dry)}: not produced or stocked at any stop', 'nothing to load for these goods')
+            at_lim = []
             for g in goods:
                 caps = [((e.get('output_capacity') or {}).get(g, 0), i) for i, (_, e) in enumerate(stops)]
                 src = max(caps)[1] if caps and max(caps)[0] > 0 else None
                 full = [f'{st["city"] or st["area"]} ({(e.get("storage") or {}).get(g, 0)})' for i, (st, e) in enumerate(stops)
                         if i != src and g in st['goods'] and e and at_limit((e.get('storage') or {}).get(g, 0),
                            (e.get('stock_trends') or {}).get(g), e.get('storage_limits_estimate') or [])]
-                if full and src is not None:
-                    ra('info', f'{g} at {", ".join(full)}: already at its storage limit',
-                       'if the route unloads it there, nothing is delivered: lower the amount or reuse the ships')
+                if full and src is not None: at_lim.append(f'{g} at {", ".join(full)}')
+            if at_lim:                      # one line per route, however many goods
+                ra('info', f'{len(at_lim)} good{"s" if len(at_lim) > 1 else ""} already at the storage limit: '
+                           + '; '.join(at_lim),
+                   'if the route unloads them there, nothing is delivered: lower the amounts or reuse the ships')
         # ---- tables
         tables = []
         rows = []
@@ -954,51 +1065,67 @@ def report_data(cur, prev, humans, horizon=60):
             for i, what, level in ((0, 'warships', 'high'), (1, 'civil ships', 'medium'), (2, 'troops', 'high')):
                 if a[i] is not None and b[i] is not None and a[i] < b[i]:
                     alarm(level, 'player', pname[o], f'{b[i] - a[i]} {what} fewer than in the previous save '
-                                                     f'({b[i]} → {a[i]})', 'lost in battle, sold or disbanded')
+                                                     f'({b[i]} → {a[i]})', 'lost in battle, sold or disbanded', vs_prev=True)
     if rows:
         sections.insert(0, {'id': 'forces', 'title': 'All provinces', 'elapsed_min': None, 'tables': [{
             'title': 'Forces per player', 'headers': ['Player', 'Warships', 'Civil ships', 'Troops', 'Present in'],
             'rows': rows}]})
     order = {'high': 0, 'medium': 1, 'info': 2}
-    alarms.sort(key=lambda x: order[x['level']])
+    resolved = 0
+    if prev and not _inner:                 # NEW = not raised by the previous save; resolved = gone since
+        before = {x['code'] for x in report_data(prev, None, humans, horizon, _inner=True)['alarms']}
+        for x in alarms: x['new'] = not x['vs_prev'] and x['code'] not in before
+        resolved = len(before - {x['code'] for x in alarms})
+    alarms.sort(key=lambda x: (order[x['level']], not x.get('new')))
     groups = collections.OrderedDict()            # one card per island / route / player, worst first
     for x in alarms:
         g = groups.setdefault((x['kind'], x['key']), {'kind': x['kind'], 'place': x['place'], 'level': x['level'],
-                                                       'detail': details.get((x['kind'], x['key']), ''), 'items': []})
+                                                       'detail': details.get((x['kind'], x['key']), ''),
+                                                       'provs': x['provs'], 'items': []})
         g['items'].append(x)
-    cards = sorted(groups.values(), key=lambda g: (order[g['level']], -sum(order[i['level']] < 2 for i in g['items'])))
-    return {'save': cur[0].get('save'), 'previous': (prev or [{}])[0].get('save'),
-            'alarms': alarms, 'groups': cards, 'sections': sections}
+    cards = sorted(groups.values(), key=lambda g: (order[g['level']], not any(i.get('new') for i in g['items']),
+                                                   -sum(order[i['level']] < 2 for i in g['items'])))
+    return {'save': cur[0].get('save'), 'previous': (prev or [{}])[0].get('save'), 'resolved': resolved,
+            'alarms': alarms, 'groups': cards, 'sections': sections,
+            'islands': [] if _inner else island_views(cur, prev, humans, alarms)}
 
-def hints(card):
-    """(alarm, hint) with each hint shown only the first time it appears in a card."""
-    seen = set()
+def hints(card, seen=None):
+    """(alarm, hint, repeated): a hint is written out the first time it appears (in the card, or in
+    the page when `seen` is shared); later repeats are only flagged, to keep cards short."""
+    seen = set() if seen is None else seen
     for a in card['items']:
-        yield a, ('' if a['hint'] in seen else a['hint'])
-        seen.add(a['hint'])
+        rep = a['hint'] in seen
+        yield a, a['hint'], rep
+        if a['hint']: seen.add(a['hint'])
 
-ALARM_KINDS = [('player', 'Empire'), ('island', 'Islands'), ('route', 'Trade routes')]
+KIND_LABEL = {'player': 'Empire', 'island': 'Island', 'route': 'Route'}
 
 def md_cell(c):
     return str(c[0] if isinstance(c, tuple) else c).replace('|', '\\|')
 
 def render_md(rep):
     out = [f"# Report: {rep['save']}", '']
-    if rep['previous']: out += [f"Compared with **{rep['previous']}**: changes since then are in brackets.", '']
+    if rep['previous']: out += [f"Compared with **{rep['previous']}**: changes since then are in brackets; "
+                                f"**NEW** marks alarms that were not there. Resolved since then: {rep.get('resolved', 0)}.", '']
     out += ['## Alarms', '']
     if not rep['groups']: out.append('No alarms.')
-    for kind, title in ALARM_KINDS:
-        cards = [g for g in rep['groups'] if g['kind'] == kind]
-        if not cards: continue
-        out += [f'### {title}', '']
-        for g in cards:
-            out.append(f"**{g['place']}**" + (f" · {g['detail']}" if g['detail'] else ''))
-            out += [f"- **{a['level']}** {a['text']}" + (f" → *{hint}*" if hint else '') for a, hint in hints(g)]
+    for g in rep['groups']:
+        out.append(f"**{g['place']}** ({KIND_LABEL.get(g['kind'], g['kind'])})" + (f" · {g['detail']}" if g['detail'] else ''))
+        out += [f"- **{a['level']}**{' **NEW**' if a.get('new') else ''} {a['text']}" + (f" → *{hint}*" if hint and not again else '')
+                for a, hint, again in hints(g)]
+        out.append('')
+    if rep.get('islands'): out += ['## Islands', '']
+    for isl in rep.get('islands', []):
+        out += [f"### {isl['label']}", '', ' · '.join(isl['facts']), '']
+        out += [f"- **{a['level']}** {a['text']}" for a in isl['alarms']]
+        if isl['alarms']: out.append('')
+        for t in isl['tables']:
+            out += [f"**{t['title']}**", '', '| ' + ' | '.join(t['headers']) + ' |', '|' + '---|' * len(t['headers'])]
+            out += ['| ' + ' | '.join(md_cell(c) for c in row) + ' |' for row in t['rows']]
             out.append('')
     for s in rep['sections']:
         out += ['', f"## {s['title']}", '']
-        if s['elapsed_min'] is not None: out += [f"Game time in this province since the previous save: {s['elapsed_min']:.1f} min "
-                    "(each province keeps its own clock)." + (' The compared save is the newer one.' if s['elapsed_min'] < 0 else ''), '']
+        if s['elapsed_min'] is not None: out += [elapsed_text(s['elapsed_min']), '']
         for t in s['tables']:
             out += [f"### {t['title']}", '']
             if t.get('note'): out += [t['note'], '']
@@ -1007,44 +1134,121 @@ def render_md(rep):
             out.append('')
     return '\n'.join(out) + '\n'
 
+def elapsed_text(m):
+    return (f'Game time in this province since the previous save: {m:.1f} min (each province keeps its own clock).'
+            + (' The compared save is the newer one.' if m < 0 else ''))
+
 HTML_STYLE = """
-:root{--bg:#f6f4ef;--panel:#fff;--text:#1d1b16;--muted:#6b665c;--line:#e2ddd2;--accent:#8a3b12;
---high:#b42318;--high-bg:#fde8e6;--medium:#9a6700;--medium-bg:#fff4d6;--info:#1f5fa8;--info-bg:#e6f0fb}
-@media (prefers-color-scheme:dark){:root:not([data-theme=light]){--bg:#16150f;--panel:#201f19;--text:#ece8de;
---muted:#a39d90;--line:#36342b;--accent:#e08a57;--high:#ff8a80;--high-bg:#3a1714;--medium:#f2c14e;
---medium-bg:#352a0e;--info:#8cbcf5;--info-bg:#132739}}
-*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);
-font:15px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif}
-header,main{max-width:1200px;margin:0 auto;padding:0 16px}header{padding-top:28px}
-h1{font-size:26px;margin:0 0 4px}h2{font-size:20px;margin:36px 0 12px;color:var(--accent)}
-h3{font-size:16px;margin:20px 0 8px}.muted{color:var(--muted)}
-nav{display:flex;flex-wrap:wrap;gap:8px;margin:16px 0}nav a{padding:4px 12px;border:1px solid var(--line);
-border-radius:999px;color:var(--text);text-decoration:none;background:var(--panel)}
-.cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(min(340px,100%),1fr));gap:12px}
-.card{background:var(--panel);border:1px solid var(--line);border-left-width:4px;border-radius:8px;padding:10px 14px}
-.high-edge{border-left-color:var(--high)}.medium-edge{border-left-color:var(--medium)}.info-edge{border-left-color:var(--info)}
-.place{font-weight:700}.detail{font-size:13px;color:var(--muted);margin-top:2px}
-.card ul{list-style:none;padding:0;margin:8px 0 0;display:grid;gap:8px}
-.hint{font-size:13px;color:var(--muted);margin:2px 0 0 72px}@media (max-width:480px){.hint{margin-left:0}}.tag{display:inline-block;min-width:64px;
-font-size:12px;font-weight:600;text-transform:uppercase;border-radius:4px;padding:1px 6px;margin-right:8px;text-align:center}
-.high{color:var(--high);background:var(--high-bg)}.medium{color:var(--medium);background:var(--medium-bg)}
-.info{color:var(--info);background:var(--info-bg)}.where{font-weight:600}
-.wrap{overflow-x:auto;background:var(--panel);border:1px solid var(--line);border-radius:8px}
-table{border-collapse:collapse;width:100%;font-size:14px}th,td{padding:6px 10px;text-align:left;
+:root{--bg:#14130f;--panel:#1e1d18;--text:#ece8de;--muted:#a39d90;--line:#36342b;--accent:#e08a57;
+--high:#ff8a80;--high-bg:#3a1714;--medium:#f2c14e;--medium-bg:#352a0e;--info:#8cbcf5;--info-bg:#132739;--new:#7ee2a8}
+:root[data-theme=light]{--bg:#f6f4ef;--panel:#fff;--text:#1d1b16;--muted:#6b665c;--line:#e2ddd2;--accent:#8a3b12;
+--high:#b42318;--high-bg:#fde8e6;--medium:#9a6700;--medium-bg:#fff4d6;--info:#1f5fa8;--info-bg:#e6f0fb;--new:#127a3f}
+*{box-sizing:border-box}html{scroll-padding-top:64px}body{margin:0;background:var(--bg);color:var(--text);
+font:14px/1.45 system-ui,-apple-system,"Segoe UI",sans-serif}
+main{max-width:1200px;margin:0 auto;padding:8px 12px 40px}
+.bar{position:sticky;top:0;z-index:5;background:var(--bg);border-bottom:1px solid var(--line);padding:6px 12px;
+display:flex;flex-wrap:wrap;gap:6px 10px;align-items:center}
+.bar .title{font-weight:700}.bar .save{color:var(--muted);font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:40ch}
+.bar .grow{flex:1}.age{font-size:12px;color:var(--muted)}.age.stale{color:var(--medium);font-weight:600}
+button{font:inherit;font-size:12px;color:var(--text);background:var(--panel);border:1px solid var(--line);
+border-radius:999px;padding:2px 10px;cursor:pointer}button[aria-pressed=false]{opacity:.45}
+button.lvl.high{color:var(--high)}button.lvl.medium{color:var(--medium)}button.lvl.info{color:var(--info)}
+button.prov[aria-pressed=true]{border-color:var(--accent);color:var(--accent)}
+h2{font-size:17px;margin:0;color:var(--accent);display:inline}.sec{margin-top:18px}
+.sec>summary{cursor:pointer;padding:6px 0;list-style-position:inside}
+h3{font-size:14px;margin:14px 0 6px}.muted{color:var(--muted)}
+.cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(min(320px,100%),1fr));gap:8px;margin-top:8px}
+.card{background:var(--panel);border:1px solid var(--line);border-left-width:4px;border-radius:6px;padding:6px 10px}
+.card[data-level=high]{border-left-color:var(--high)}.card[data-level=medium]{border-left-color:var(--medium)}
+.card[data-level=info]{border-left-color:var(--info)}
+.head{display:flex;gap:8px;align-items:baseline;flex-wrap:wrap}.place{font-weight:700}
+.kind{font-size:11px;text-transform:uppercase;color:var(--muted)}.detail{font-size:12px;color:var(--muted)}
+.card ul{list-style:none;padding:0;margin:4px 0 0;display:grid;gap:4px}
+.card li{padding-left:12px;position:relative}.card li::before{content:"";position:absolute;left:0;top:.55em;
+width:6px;height:6px;border-radius:50%;background:var(--info)}
+.card li[data-level=high]::before{background:var(--high)}.card li[data-level=medium]::before{background:var(--medium)}
+.hint{font-size:12px;color:var(--muted)}.new{font-size:10px;font-weight:700;color:var(--new);border:1px solid var(--new);
+border-radius:4px;padding:0 4px;margin-right:4px}
+.wrap{overflow-x:auto;background:var(--panel);border:1px solid var(--line);border-radius:6px}
+table{border-collapse:collapse;width:100%;font-size:13px}th,td{padding:4px 8px;text-align:left;
 border-bottom:1px solid var(--line);white-space:nowrap}td.num,th.num{text-align:right;font-variant-numeric:tabular-nums}
 th{cursor:pointer;user-select:none;background:var(--panel)}tr:last-child td{border-bottom:0}
-details{margin:8px 0}summary{cursor:pointer;font-weight:600;padding:4px 0}img{max-width:100%;border-radius:8px;
-border:1px solid var(--line)}.note{font-size:13px;color:var(--muted);margin:6px 0}footer{margin:40px 0;font-size:13px}
+td:first-child,th:first-child{position:sticky;left:0;background:var(--panel)}
+details{margin:6px 0}summary{cursor:pointer;font-weight:600}img{max-width:100%;border-radius:6px;border:1px solid var(--line)}
+.note{font-size:12px;color:var(--muted);margin:4px 0}
+select{font:inherit;font-size:12px;color:var(--text);background:var(--panel);border:1px solid var(--line);border-radius:6px;
+padding:2px 6px;max-width:100%}.place[data-island]{cursor:pointer;text-decoration:underline dotted}
+.isl h2{display:block;margin:6px 0 2px}.facts{color:var(--muted);font-size:12px;margin-bottom:6px}
+.isl ul.al{list-style:none;padding:0;margin:6px 0;display:grid;gap:3px}.isl ul.al li{padding-left:12px;position:relative}
+.isl ul.al li::before{content:"";position:absolute;left:0;top:.55em;width:6px;height:6px;border-radius:50%;background:var(--info)}
+.isl ul.al li[data-level=high]::before{background:var(--high)}.isl ul.al li[data-level=medium]::before{background:var(--medium)}
+td.st-out,td.st-low,td.st-nb{color:var(--high);font-weight:600}td.st-ns{color:var(--muted)}td.st-lim{color:var(--info)}
+footer{margin:30px 0;font-size:12px}kbd{font-size:11px;
+border:1px solid var(--line);border-radius:3px;padding:0 3px}
 """
 
-HTML_SCRIPT = """
+HTML_SCRIPT = r"""
+const S={get(k,d){try{const v=localStorage.getItem('anno117:'+k);return v===null?d:JSON.parse(v)}catch(e){return d}},
+set(k,v){try{localStorage.setItem('anno117:'+k,JSON.stringify(v))}catch(e){}}};
+const R=document.documentElement,B=window.__REPORT;
+R.dataset.theme=S.get('theme','dark');
+let hidden=new Set(S.get('hidden',['info'])),prov=S.get('prov','all');
+const cards=[...document.querySelectorAll('.card')],secs=[...document.querySelectorAll('.sec[data-prov]')];
+function apply(){
+  const n={high:0,medium:0,info:0};
+  cards.forEach(c=>{const ok=prov==='all'||!c.dataset.prov||c.dataset.prov.split(' ').includes(prov);let vis=0;
+    c.querySelectorAll('li').forEach(li=>{const l=li.dataset.level;if(ok)n[l]++;const v=ok&&!hidden.has(l);li.hidden=!v;vis+=v});
+    c.hidden=!vis});
+  secs.forEach(s=>s.hidden=!(prov==='all'||s.dataset.prov===prov));
+  document.querySelectorAll('button.lvl').forEach(b=>{const l=b.dataset.level;b.setAttribute('aria-pressed',!hidden.has(l));
+    b.textContent=n[l]+' '+l});
+  document.querySelectorAll('button.prov').forEach(b=>b.setAttribute('aria-pressed',b.dataset.prov===prov));
+  const empty=document.getElementById('none');if(empty)empty.hidden=cards.some(c=>!c.hidden);
+  document.title=(n.high?'('+n.high+') ':'')+'Anno 117 report';
+}
+function toggle(l){hidden.has(l)?hidden.delete(l):hidden.add(l);S.set('hidden',[...hidden]);apply()}
+document.querySelectorAll('button.lvl').forEach(b=>b.onclick=()=>toggle(b.dataset.level));
+document.querySelectorAll('button.prov').forEach(b=>b.onclick=()=>{prov=b.dataset.prov;S.set('prov',prov);apply()});
+document.getElementById('theme').onclick=()=>{R.dataset.theme=R.dataset.theme==='dark'?'light':'dark';S.set('theme',R.dataset.theme)};
+const maps=()=>{const d=[...document.querySelectorAll('details.map')],o=!d.some(x=>x.open);d.forEach(x=>x.open=o);S.set('maps',o)};
+document.getElementById('maps').onclick=maps;
+if(S.get('maps',false))document.querySelectorAll('details.map').forEach(x=>x.open=true);
+document.querySelectorAll('details[id]').forEach(d=>{const k='open:'+d.id,v=S.get(k,null);if(v!==null)d.open=v;
+  d.addEventListener('toggle',()=>S.set(k,d.open))});
 document.querySelectorAll('table').forEach(t=>t.querySelectorAll('th').forEach((th,i)=>th.onclick=()=>{
-const b=t.tBodies[0],rows=[...b.rows],dir=th.dataset.dir=th.dataset.dir==='asc'?'desc':'asc';
-const key=r=>{const c=r.cells[i];return c.dataset.v!==undefined?parseFloat(c.dataset.v):c.textContent.toLowerCase()};
-rows.sort((x,y)=>{const a=key(x),c=key(y);return (a>c?1:a<c?-1:0)*(dir==='asc'?1:-1)});rows.forEach(r=>b.appendChild(r))}));
+  const b=t.tBodies[0],rows=[...b.rows],dir=th.dataset.dir=th.dataset.dir==='asc'?'desc':'asc';
+  const key=r=>{const c=r.cells[i];return c.dataset.v!==undefined?parseFloat(c.dataset.v):c.textContent.toLowerCase()};
+  rows.sort((x,y)=>{const a=key(x),c=key(y);return (a>c?1:a<c?-1:0)*(dir==='asc'?1:-1)});rows.forEach(r=>b.appendChild(r))}));
+function age(){const m=Math.round((Date.now()-B.generated)/60000),e=document.getElementById('age');
+  e.textContent='updated '+new Date(B.generated).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'})+' · '+m+' min ago';
+  e.classList.toggle('stale',m>=B.stale)}
+age();setInterval(age,30000);
+function go(d){const v=cards.filter(c=>!c.hidden);if(!v.length)return;const y=window.scrollY+70;
+  let i=d>0?v.findIndex(c=>c.getBoundingClientRect().top+window.scrollY>y+1):v.length-1-[...v].reverse().findIndex(c=>c.getBoundingClientRect().top+window.scrollY<y-1);
+  if(i<0||i>=v.length)i=d>0?v.length-1:0;v[i].scrollIntoView({block:'start'})}
+document.addEventListener('keydown',e=>{if(e.ctrlKey||e.metaKey||e.altKey||/input|select|textarea/i.test(e.target.tagName))return;
+  const k=e.key;if(k==='1')toggle('high');else if(k==='2')toggle('medium');else if(k==='3')toggle('info');
+  else if(k==='j')go(1);else if(k==='k')go(-1);else if(k==='m')maps();else if(k==='g')scrollTo(0,0);
+  else if(k==='t')document.getElementById('theme').click();else if(k==='r')location.reload()});
+try{const y=sessionStorage.getItem('anno117:y');if(y!==null){sessionStorage.removeItem('anno117:y');scrollTo(0,+y)}}catch(e){}
+if(B.stamp){let wait=5000;const poll=()=>{const s=document.createElement('script');
+  s.src=B.stamp+'?t='+Date.now();
+  s.onload=()=>{s.remove();if(window.__annoStamp&&window.__annoStamp!==B.build){
+    try{sessionStorage.setItem('anno117:y',String(window.scrollY))}catch(e){}location.reload()}else setTimeout(poll,wait)};
+  s.onerror=()=>{s.remove();setTimeout(poll,30000)};document.head.appendChild(s)};setTimeout(poll,wait)}
+const VI=document.getElementById('v-island'),VA=document.getElementById('v-alarms'),SEL=document.getElementById('isl'),VB=document.getElementById('view');
+function showIsland(id){if(!SEL)return;if(id&&[...SEL.options].some(o=>o.value===id))SEL.value=id;S.set('island',SEL.value);
+  document.querySelectorAll('.isl').forEach(x=>x.hidden=x.dataset.id!==SEL.value)}
+function view(v){if(!VI)return;VI.hidden=v!=='island';VA.hidden=v==='island';VB.textContent=v==='island'?'alarms':'island';
+  VB.title=v==='island'?'back to the alarms (i)':'island view (i)';S.set('view',v);scrollTo(0,0)}
+if(SEL){showIsland(S.get('island',SEL.value));SEL.onchange=()=>{showIsland(SEL.value);view('island')};
+  VB.onclick=()=>view(VI.hidden?'island':'alarms');view(S.get('view','alarms'));
+  document.querySelectorAll('.place[data-island]').forEach(p=>p.onclick=()=>{showIsland(p.dataset.island);view('island')});
+  document.addEventListener('keydown',e=>{if(e.key==='i'&&!/input|select|textarea/i.test(e.target.tagName))view(VI.hidden?'island':'alarms')})}
+apply();
 """
 
-def render_html(rep, images):
+def render_html(rep, images, stamp=None):
     import base64, html
     h = html.escape
     def td(c):
@@ -1052,49 +1256,103 @@ def render_html(rep, images):
             v = '' if c[1] is None else f' data-v="{c[1]}"'
             return f'<td class="num"{v}>{h(c[0])}</td>'
         return f'<td>{h(str(c))}</td>'
-    def table(t):
+    def table(t, sid):
         nums = [any(isinstance(r[i], tuple) for r in t['rows']) for i in range(len(t['headers']))]
         head = ''.join(f'<th class="num">{h(x)}</th>' if n else f'<th>{h(x)}</th>' for x, n in zip(t['headers'], nums))
         body = ''.join('<tr>' + ''.join(td(c) for c in r) + '</tr>' for r in t['rows'])
         note = f'<p class="note">{h(t["note"])}</p>' if t.get('note') else ''
         inner = f'{note}<div class="wrap"><table><thead><tr>{head}</tr></thead><tbody>{body}</tbody></table></div>'
-        if t.get('collapsed'): return f'<details><summary>{h(t["title"])} ({len(t["rows"])})</summary>{inner}</details>'
+        if t.get('collapsed'):
+            did = h(re.sub(r'\W+', '-', f'{sid}-{t["title"]}'))
+            return f'<details id="{did}"><summary>{h(t["title"])} ({len(t["rows"])})</summary>{inner}</details>'
         return f'<h3>{h(t["title"])}</h3>{inner}'
-    out = ['<!doctype html><html lang="en"><head><meta charset="utf-8">',
+    provs = [s['id'] for s in rep['sections'] if s['id'] != 'forces']
+    meta = {'build': rep.get('build', ''), 'generated': rep.get('generated', 0), 'stale': rep.get('stale_minutes', 45),
+            'stamp': stamp}
+    bar = ('<div class="bar"><span class="title">Anno 117</span>'
+           f'<span class="save" title="{h(rep["save"] or "")}">{h(rep["save"] or "")}</span>'
+           + ''.join(f'<button class="lvl {l}" data-level="{l}" title="show/hide ({k})">{l}</button>'
+                     for l, k in (('high', 1), ('medium', 2), ('info', 3)))
+           + '<button class="prov" data-prov="all">all</button>'
+           + ''.join(f'<button class="prov" data-prov="{h(p)}">{h(p)}</button>' for p in provs)
+           + '<span class="grow"></span><span class="age" id="age"></span>'
+           + ('<button id="view" title="island view (i)">island</button><select id="isl" aria-label="island">'
+              + ''.join(f'<option value="{h(i["id"])}">{h(i["label"])}</option>' for i in rep.get('islands', []))
+              + '</select>' if rep.get('islands') else '')
+           + '<button id="maps" title="maps (m)">maps</button><button id="theme" title="theme (t)">◐</button></div>')
+    out = ['<!doctype html><html lang="en" data-theme="dark"><head><meta charset="utf-8">',
            '<meta name="viewport" content="width=device-width,initial-scale=1">',
-           f'<title>Anno 117 report</title><style>{HTML_STYLE}</style></head><body><header>',
-           f'<h1>Anno 117 report</h1><div class="muted">{h(rep["save"] or "")}'
-           + (f' · compared with {h(rep["previous"])}' if rep['previous'] else '') + '</div>',
-           '<nav><a href="#alarms">Alarms</a>' + ''.join(f'<a href="#{h(s["id"])}">{h(s["title"])}</a>' for s in rep['sections'])
-           + '</nav></header><main>', f'<h2 id="alarms">Alarms ({len(rep["alarms"])})</h2>']
-    if not rep['groups']: out.append('<p>No alarms.</p>')
-    for kind, title in ALARM_KINDS:
-        cards = [g for g in rep['groups'] if g['kind'] == kind]
-        if not cards: continue
-        out.append(f'<h3>{h(title)} ({len(cards)})</h3><div class="cards">')
-        for g in cards:
-            items = ''.join(f'<li><span class="tag {a["level"]}">{a["level"]}</span>{h(a["text"])}'
-                            + (f'<div class="hint">{h(hint)}</div>' if hint else '') + '</li>' for a, hint in hints(g))
-            out.append(f'<section class="card {g["level"]}-edge"><div class="place">{h(g["place"])}</div>'
-                       + (f'<div class="detail">{h(g["detail"])}</div>' if g['detail'] else '')
-                       + f'<ul>{items}</ul></section>')
+           f'<title>Anno 117 report</title><style>{HTML_STYLE}</style>',
+           f'<script>window.__REPORT={json.dumps(meta)}</script></head><body>', bar, '<main>']
+    sub = []
+    if rep['previous']:
+        sub.append(f'compared with {h(rep["previous"])} · resolved since then: {rep.get("resolved", 0)}')
+    sub.append('keys: <kbd>1</kbd><kbd>2</kbd><kbd>3</kbd> levels · <kbd>j</kbd>/<kbd>k</kbd> next/previous · '
+               '<kbd>i</kbd> island view · <kbd>m</kbd> maps · <kbd>g</kbd> top · <kbd>t</kbd> theme')
+    out.append(f'<p class="muted" style="font-size:12px;margin:2px 0">{" · ".join(sub)}</p>')
+    island_of = {i['label']: i['id'] for i in rep.get('islands', [])}
+    if rep.get('islands'):
+        state = {'out of stock': 'st-out', 'running low': 'st-low', 'not built': 'st-ns', 'not supplied': 'st-ns',
+                 'at limit': 'st-lim', 'missing': 'st-out'}
+        def isl_table(t):
+            nums = [any(isinstance(r[i], tuple) for r in t['rows']) for i in range(len(t['headers']))]
+            head = ''.join(f'<th class="num">{h(x)}</th>' if n else f'<th>{h(x)}</th>' for x, n in zip(t['headers'], nums))
+            sc = t['headers'].index('State') if 'State' in t['headers'] else -1
+            body = ''.join('<tr>' + ''.join(f'<td class="{state.get(c, "")}">{h(str(c))}</td>' if i == sc else td(c)
+                                            for i, c in enumerate(r)) + '</tr>' for r in t['rows'])
+            note = f'<p class="note">{h(t["note"])}</p>' if t.get('note') else ''
+            return f'<h3>{h(t["title"])} ({len(t["rows"])})</h3>{note}<div class="wrap"><table><thead><tr>{head}</tr></thead><tbody>{body}</tbody></table></div>'
+        out.append('<div id="v-island" hidden>')
+        for i in rep['islands']:
+            al = ''.join(f'<li data-level="{a["level"]}">' + ('<span class="new">NEW</span>' if a.get('new') else '')
+                         + h(a['text']) + '</li>' for a in i['alarms'])
+            out.append(f'<section class="isl" data-id="{h(i["id"])}" hidden><h2>{h(i["label"])}</h2>'
+                       f'<div class="facts">{h(" · ".join(i["facts"]))}</div>'
+                       + (f'<ul class="al">{al}</ul>' if al else '<p class="muted">No alarms on this island.</p>')
+                       + ''.join(isl_table(t) for t in i['tables']) + '</section>')
         out.append('</div>')
+    out.append('<div id="v-alarms">')
+    out.append('<div class="cards">')
+    seen = set()
+    for g in rep['groups']:
+        items = ''.join(
+            f'<li data-level="{a["level"]}"' + (f' title="{h(hint)}"' if hint and again else '') + '>'
+            + ('<span class="new">NEW</span>' if a.get('new') else '') + h(a['text'])
+            + (f'<div class="hint">{h(hint)}</div>' if hint and not again else '') + '</li>'
+            for a, hint, again in hints(g, seen))
+        out.append(f'<section class="card" data-level="{g["level"]}" data-prov="{h(" ".join(g.get("provs", [])))}">'
+                   f'<div class="head"><span class="place"'
+                   + (f' data-island="{h(island_of[g["place"]])}" title="open the island view"' if g['place'] in island_of else '')
+                   + f'>{h(g["place"])}</span>'
+                   f'<span class="kind">{h(KIND_LABEL.get(g["kind"], g["kind"]))}</span>'
+                   + (f'<span class="detail">{h(g["detail"])}</span>' if g['detail'] else '')
+                   + f'</div><ul>{items}</ul></section>')
+    out.append('</div><p id="none" class="muted" hidden>No alarms with the current filters.</p>')
     for s in rep['sections']:
-        out.append(f'<h2 id="{h(s["id"])}">{h(s["title"])}</h2>')
-        if s['elapsed_min'] is not None:
-            out.append(f'<p class="muted">Game time in this province since the previous save: {s["elapsed_min"]:.1f} min '
-                       '(each province keeps its own clock).' + (' The compared save is the newer one.' if s['elapsed_min'] < 0 else '') + '</p>')
+        prov = '' if s['id'] == 'forces' else f' data-prov="{h(s["id"])}"'
+        out.append(f'<details class="sec" id="sec-{h(s["id"])}" open{prov}><summary><h2>{h(s["title"])}</h2></summary>')
+        if s['elapsed_min'] is not None: out.append(f'<p class="muted">{h(elapsed_text(s["elapsed_min"]))}</p>')
         img = images.get(s['id'])
         if img:
             with open(img, 'rb') as f:
-                out.append(f'<img alt="Map of {h(s["title"])}" src="data:image/png;base64,{base64.b64encode(f.read()).decode()}">')
-        out += [table(t) for t in s['tables']]
+                out.append(f'<details class="map"><summary>Map</summary><img loading="lazy" decoding="async" '
+                           f'alt="Map of {h(s["title"])}" src="data:image/png;base64,{base64.b64encode(f.read()).decode()}"></details>')
+        out += [table(t, s['id']) for t in s['tables']]
+        out.append('</details>')
+    out.append('</div>')
     out.append('<footer class="muted">Made with anno117.py report. Trends come from the warehouse chart stored '
                'in the save (last 20 minutes); storage limits are estimated.</footer></main>')
     out.append(f'<script>{HTML_SCRIPT}</script></body></html>')
     return '\n'.join(out)
 
+def write_atomic(path, text):
+    """Write next to the target and rename, so a page reloading meanwhile never reads half a file."""
+    tmp = path + '.tmp'
+    with open(tmp, 'w', encoding='utf-8') as f: f.write(text)
+    os.replace(tmp, path)
+
 def cmd_report(a):
+    import time
     cur = load_results(a.current, a)
     prev = load_results(a.compare, a) if a.compare else None
     humans = set()
@@ -1109,16 +1367,21 @@ def cmd_report(a):
     if a.compare:
         rep['previous'] = os.path.basename(os.path.normpath(a.compare)) + (
             f" ({prev[0]['save']})" if os.path.isdir(a.compare) and prev[0].get('save') else '')
+    now = time.time()
+    rep['generated'], rep['build'], rep['stale_minutes'] = int(now * 1000), f'{now:.3f}', a.stale
     images = {}
     for s in rep['sections']:
         for f in (f"{s['id']}.png", f"{s['id']}_map.png"):
             if a.maps and os.path.exists(os.path.join(a.maps, f)): images[s['id']] = os.path.join(a.maps, f); break
-    with open(a.output, 'w', encoding='utf-8') as f: f.write(render_html(rep, images))
-    if a.md:
-        with open(a.md, 'w', encoding='utf-8') as f: f.write(render_md(rep))
+    stamp = os.path.basename(a.output) + '.stamp.js'
+    write_atomic(a.output, render_html(rep, images, stamp))
+    # an open page polls this tiny file and reloads itself when the build id changes (works on file:// too)
+    write_atomic(os.path.join(os.path.dirname(os.path.abspath(a.output)), stamp),
+                 f'window.__annoStamp={json.dumps(rep["build"])};\n')
+    if a.md: write_atomic(a.md, render_md(rep))
     lv = collections.Counter(x['level'] for x in rep['alarms'])
-    print(f"{len(rep['alarms'])} alarms ({lv['high']} high, {lv['medium']} medium, {lv['info']} info) -> "
-          f"{a.output}" + (f', {a.md}' if a.md else ''))
+    print(f"{len(rep['alarms'])} alarms ({lv['high']} high, {lv['medium']} medium, {lv['info']} info, "
+          f"{sum(1 for x in rep['alarms'] if x.get('new'))} new) -> {a.output}" + (f', {a.md}' if a.md else ''))
 
 # ---------------- game data (assets) ----------------
 # assets.xml = <Asset><Template/><Values><Standard><GUID/><Name/>...</Standard><Text><OasisId/></Text>...
@@ -1201,6 +1464,15 @@ def read_assets(files):
                                            for i in fb.findall(tag + '/Item') if txt(i, 'Product')}
                         fac = {'in': io_('FactoryInputs'), 'out': io_('FactoryOutputs'), 'cycle': txt(fb, 'CycleTime')}
                         a['factory'] = {k: v for k, v in fac.items() if v}
+                    nl = el.find('Values/Residence7/NeedsList')
+                    if nl is not None:   # what a house type asks for (rate: unit not confirmed, see docs)
+                        a['needs'] = [{k: v for k, v in (('need', txt(i, 'Need')), ('rate', txt(i, 'NeedConsumptionRate')),
+                                                         ('buff_only', txt(i, 'IsOnlyAvailableThroughBuff') == '1')) if v}
+                                      for i in nl.findall('Item') if txt(i, 'Need')]
+                    nd = el.find('Values/Need')
+                    if nd is not None and txt(nd, 'NeedProduct'):
+                        a['need'] = {k: v for k, v in (('product', txt(nd, 'NeedProduct')),
+                                                       ('category', txt(nd, 'NeedCategoryType'))) if v}
                     assets[int(g)] = {k: v for k, v in a.items() if v}
                 el.clear()
         except ET.ParseError as e:
@@ -1222,6 +1494,13 @@ def read_texts(files):
         except ET.ParseError as e:
             print(f'  ! {f}: invalid XML ({e})', file=sys.stderr)
     return t
+
+CULTURE_WORDS = {'Tech', 'Need', 'Roman', 'Celtic', 'Egyptian', 'Greco', 'Greco-Roman'}
+
+def need_category(name):
+    """Category of a need asset that does not set NeedCategoryType, from its internal name:
+    'Need Roman Celtic Public Market' -> 'Public'."""
+    return next((w for w in (name or '').split() if w not in CULTURE_WORDS), None)
 
 def cmd_assets(a):
     print(f'Searching {a.path} for assets and {a.lang} texts ...')
@@ -1259,11 +1538,20 @@ def cmd_assets(a):
         local = texts.get(int(tid)) if tid and tid.lstrip('-').isdigit() else texts.get(g)
         if local: x['name_local'] = local
         if inherited(g, 'template'): x['template'] = inherited(g, 'template')
+        for key in ('needs', 'need'):
+            v = inherited(g, key)
+            if v: x[key] = v
+        if x.get('needs'):               # resolve each need to its good (or public building) right away
+            for nd in x['needs']:
+                info = (inherited(int(nd['need']), 'need') or {}) if str(nd.get('need', '')).isdigit() else {}
+                if info.get('product'): nd['product'] = info['product']
+                cat = info.get('category') or need_category(inherited(int(nd['need']), 'name'))
+                if cat: nd['category'] = cat
         fac = factory(g)
         if fac:
             x['factory'] = fac
             if 'cycle' not in fac and default_cycle: fac['cycle'] = default_cycle
-        if a.all or 'factory' in x or RE_USEFUL.search(x.get('template') or '') or RE_USEFUL.search(x.get('name') or ''):
+        if a.all or 'factory' in x or 'needs' in x or 'need' in x or RE_USEFUL.search(x.get('template') or '') or RE_USEFUL.search(x.get('name') or ''):
             out[str(g)] = x
     out = dict(sorted(out.items(), key=lambda kv: int(kv[0])))
     write_json(a.output, out, 1)
@@ -1578,6 +1866,8 @@ def main():
     rp.add_argument('--names', action='append', metavar='FILE', help='GUID name map(s), as for extract')
     rp.add_argument('--texts', action='append', metavar='FILE', help='texts_<lang>.xml, as for extract')
     rp.add_argument('--city-names', metavar='FILE', help='your city names, as for extract')
+    rp.add_argument('--stale', type=float, default=45,
+                    help='minutes after which the open page marks itself as old (default 45)')
     rp.add_argument('--radius', type=float, default=40, help=argparse.SUPPRESS)
     a = ap.parse_args()
     {'extract': cmd_extract, 'assets': cmd_assets, 'list': cmd_list, 'guid-table': cmd_guid_table,

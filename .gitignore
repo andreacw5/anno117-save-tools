@@ -10,3 +10,4 @@ __pycache__/
 *_map.png
 report.html
 report.md
+*.stamp.js

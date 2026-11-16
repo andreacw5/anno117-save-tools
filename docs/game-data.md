@@ -32,8 +32,15 @@ Language archives such as `en_us0.rda` only hold voice-over sound banks; they ar
 
    Assets without `<Template>` inherit it, the name's text id and production data from their
    `BaseAssetGUID` (production key by key: a derived asset may override only `CycleTime`).
-   Without `--all`, only naval, military, participant, session, fertility, city status and
-   production assets are kept.
+   House types also get `needs`, from `Values/Residence7/NeedsList`: each item's `Need` asset,
+   resolved to the good or public building it stands for (`Values/Need/NeedProduct`) and its
+   category (`NeedCategoryType`, or the first word of the need's internal name after the culture
+   words, e.g. *Need Roman Celtic Public Market* → `Public`), with `rate`
+   (`NeedConsumptionRate`, unit not confirmed; absent for services such as market or tavern) and
+   `buff_only` (`IsOnlyAvailableThroughBuff`). The list holds every need a house type can have,
+   optional ones and ones not unlocked yet included.
+   Without `--all`, only naval, military, participant, session, fertility, city status,
+   production, house and need assets are kept.
 4. `extract` then picks `guid_names.json` up automatically (`--names` to point elsewhere).
 
 You can also point `assets` at a folder of `.xml` files already extracted with another tool,
