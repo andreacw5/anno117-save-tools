@@ -258,7 +258,8 @@ id, route):
 | `Ships` | the ships' `MetaPersistent/MetaID`s, one `uint64` each |
 | `Stations/t1` | stops: `AreaID` (`uint16`, an area id of some session), `AreaOwner`, `GoodInfos/t1` with `ProductGUID` and `Amount` (`int32`) |
 
-`extract` resolves ships through their `MetaID` (all ships in the saves we tested were found) and
+`extract` resolves ships through their `MetaID` (all ships in the saves we tested were found; each
+route ship keeps its `meta_id` and its default `name`) and
 stations through the area ids. Area ids are unique only within a session: when an id exists in
 several sessions, the station goes to the session of the route's ships. Each route is added, as
 `trade_routes`, to every session it stops in. Whether a good is loaded or unloaded at a station is

@@ -565,6 +565,18 @@ class TestRouteFlows(unittest.TestCase):
         self.assertEqual(small['supplies'], {'Bread': ['Cinis']})
         self.assertEqual(cap['receives'], {'Bread': ['Memphis']})
 
+    def test_route_ships_carry_meta_id_and_name(self):
+        results = [{'session': 'nile', 'areas': [{'area': 1, 'owner': 41}]}]
+        routes = [{'id': 1, 'name': 'Bread Mem - Cin', 'owner': 41, 'ships': [7, 8, 9],
+                   'stations': [{'area': 1, 'goods': {}}]}]
+        ships = {7: ('nile', 37224, 10, 20, 'Annona'), 8: ('nile', 37224, 11, 21, None)}
+        A.attach_routes(results, routes, ships, {41: 'Me'}, {37224: 'Quinquereme'})
+        got = results[0]['trade_routes'][0]['ships']
+        self.assertEqual(got[0], {'meta_id': 7, 'name': 'Annona', 'type': 'Quinquereme', 'guid': 37224,
+                                  'session': 'nile', 'position': [10, 20]})
+        self.assertNotIn('name', got[1])
+        self.assertEqual(got[2], {'meta_id': 9})
+
     def test_history_records_ship_steps(self):
         n = lambda name, value=None, kids=(): setattr(x := A.Node(name, value), 'children', list(kids)) or x
         pts = [100, 99, 49, 48, 98, 97]               # a ship loads 50, another unloads 50

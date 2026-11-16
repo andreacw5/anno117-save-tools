@@ -593,14 +593,14 @@ def areas(sroot, names, gmap, texts, ainfo=None):
         out.append(e)
     return out
 
-def ship_index(sroot):
-    """MetaID -> (ship GUID, x, z) for every ship of a session."""
+def ship_index(sroot, texts=None):
+    """MetaID -> (ship GUID, x, z, name or None) for every ship of a session."""
     out = {}
     for ob in session_objects(sroot):
         mid, gn = one(one(ob, 'MetaPersistent'), 'MetaID'), one(ob, 'guid')
         if one(ob, 'ShipModuleOwner') is not None and mid is not None and gn is not None:
             x, _, z = unpack(one(ob, 'Position'), '<fff') or (0, 0, 0)
-            out[u(mid.value)] = (u(gn.value), round(x), round(z))
+            out[u(mid.value)] = (u(gn.value), round(x), round(z), ship_name(ob, texts or {}))
     return out
 
 def trade_routes(data_root):
@@ -666,7 +666,8 @@ def attach_routes(results, routes, ships, names, gmap):
                           'goods': {name(g): n for g, n in st['goods'].items()}})
         row = {'id': rt['id'], 'name': rt['name'], 'owner': rt['owner'],
                'owner_name': names.get(rt['owner']) or gmap.get(rt['owner']),
-               'ships': [{'type': name(x[1]), 'guid': x[1], 'session': x[0], 'position': [x[2], x[3]]} if x
+               'ships': [{'meta_id': m, **({'name': x[4]} if len(x) > 4 and x[4] else {}),
+                          'type': name(x[1]), 'guid': x[1], 'session': x[0], 'position': [x[2], x[3]]} if x
                          else {'meta_id': m} for m, x in zip(rt['ships'], sh)],
                'stations': stops}
         for r in results:                   # no station resolved: show it where its ships are
@@ -717,7 +718,7 @@ def extract_results(save, paths, texts_files=None, city_names=None, radius=40):
         label = session_label(sg, gmap)
         if label in seen: label = f'{label}_{sg}'          # two sessions with the same name
         seen.add(label)
-        ships.update({m: (label,) + v for m, v in ship_index(sroot).items()})
+        ships.update({m: (label,) + v for m, v in ship_index(sroot, texts).items()})
         st = one(one(sroot, 'GameSessionManager'), 'SessionTotalTime')
         results.append({'session': label, 'session_guid': sg, 'save': os.path.basename(save),
                         **({'session_time_ms': u(st.value)} if st is not None and st.value else {}),
