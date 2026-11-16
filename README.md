@@ -9,8 +9,9 @@ No dependencies, Python 3.8 or newer.
   minute, income, city status) and the trade routes with their ships and stops.
 - **`assets`**: pull the official GUID → name map out of your own copy of the game.
 - **`map`**: draw a province as a PNG, from the save's map template and the game's own map tiles,
-  with islands, buildings, ships and units coloured by owner (warships as triangles, civil and cargo
-  ships as circles, troops as squares) and pirate structures marked.
+  with islands, buildings, ships and units coloured by owner (warships as black-rimmed triangles, civil and cargo
+  ships as white-rimmed circles, troops as black-rimmed squares, all scaled to stay readable) and
+  pirate structures marked.
 - **`report`**: one HTML page (and optionally Markdown) on your state: alarms first (goods running
   out, idle buildings, workforce shortages, routes without ships or stock, losses since an earlier
   save) grouped per island and per route with a hint, warships, civil ships and troops per player

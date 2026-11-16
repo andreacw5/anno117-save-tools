@@ -1011,7 +1011,7 @@ def report_data(cur, prev, humans, horizon=60, _inner=False):
             if npc(p['participant']): continue
             now, before = fleet(p), fleet(old_parts.get(p['participant']) or {})
             keys = set(now) | (set(before) if is_human(p['participant']) else set())
-            for role, t in sorted(keys, key=lambda k: (k[0] != 'war', k[1])):
+            for role, t in sorted(keys, key=lambda k: (k[0] != 'war', k[1], str(k[0]))):
                 rows.append([p['name'] or 'unknown owner', ROLE_LABEL.get(role, role), t,
                              cell(now[(role, t)], before[(role, t)] if pr else None)])
         if rows: tables.append({'title': 'Fleets', 'headers': ['Owner', 'Role', 'Ship type', 'Ships'], 'rows': rows,
@@ -1034,7 +1034,7 @@ def report_data(cur, prev, humans, horizon=60, _inner=False):
             st, tr, lims, made = e.get('storage') or {}, e.get('stock_trends') or {}, e.get('storage_limits_estimate') or [], e.get('output_capacity') or {}
             ost = (old_area.get(e['area']) or {}).get('storage') or {}
             rows = []
-            for g in sorted(set(st) | set(tr), key=lambda g: -st.get(g, 0)):
+            for g in sorted(set(st) | set(tr), key=lambda g: (-st.get(g, 0), g)):
                 t = tr.get(g) or {}
                 state = 'at limit' if at_limit(st.get(g, 0), t, lims) else ''
                 rows.append([g, cell(st.get(g, 0), ost.get(g, 0) if pr else None),
@@ -1785,14 +1785,20 @@ def cmd_map(a):
             dashed(pa, qa, (0, 0, 0), w + 3)
             dashed(pa, qa, color.get(owner, (255, 215, 0)), w)
     draw_order = {'civil': 0, 'unit': 1, 'warship': 2}                # warships on top
+    k = max(1.0, H / max(a.width or 1600, 1))                          # icon scale: same size after resizing
     for kind, o, aid, x, z in sorted((ob for ob in objs if ob[0] in draw_order), key=lambda ob: draw_order[ob[0]]):
         c = color.get(o, grey); y = H - z
+        # military icons are larger and drawn over a black shape, so they stand out on buildings of the same
+        # colour; sizes follow the map size, which is scaled down to --width afterwards
         if kind == 'warship':                                          # triangles
-            d.polygon([(x, y - 10), (x - 8, y + 7), (x + 8, y + 7)], fill=c, outline=(0, 0, 0), width=2)
-        elif kind == 'civil':                                          # small circles
-            d.ellipse((x - 5, y - 5, x + 5, y + 5), fill=c, outline=(0, 0, 0))
-        elif o is not None:                                            # units: squares
-            d.rectangle((x - 5, y - 5, x + 5, y + 5), fill=c, outline=(0, 0, 0))
+            d.polygon([(x, y - 16 * k), (x - 13 * k, y + 10 * k), (x + 13 * k, y + 10 * k)], fill=(0, 0, 0))
+            d.polygon([(x, y - 10 * k), (x - 8 * k, y + 6 * k), (x + 8 * k, y + 6 * k)], fill=c)
+        elif kind == 'civil':                                          # circles with a white rim: merchant ships
+            d.ellipse((x - 10 * k, y - 10 * k, x + 10 * k, y + 10 * k), fill=(255, 255, 255))
+            d.ellipse((x - 7 * k, y - 7 * k, x + 7 * k, y + 7 * k), fill=c)
+        elif o is not None:                                            # troops: squares
+            d.rectangle((x - 10 * k, y - 10 * k, x + 10 * k, y + 10 * k), fill=(0, 0, 0))
+            d.rectangle((x - 6 * k, y - 6 * k, x + 6 * k, y + 6 * k), fill=c)
     f, fs = font(max(14, H // 90)), font(max(11, H // 130))
     gap = max(6, H // 200)                                             # space between name and owner
     for e in area_list:
@@ -1811,7 +1817,7 @@ def cmd_map(a):
         rows += [((255, 60, 60), 'pirate structures (x)'), (grey, 'nobody / unknown')]
         lf = font(max(14, H // 100)); lh = lf.size + 8 if hasattr(lf, 'size') else 20
         bx, by = 20, 20
-        head = f'{label}: warships = triangles, civil ships = circles, units = squares'
+        head = f'{label}: warships = black-rimmed triangles, civil ships = white-rimmed circles, troops = squares'
         bw = max(d.textlength(t, font=lf) for t in [head] + [r[1] for r in rows]) + 40
         d.rectangle((bx - 10, by - 10, bx + bw, by + lh * (len(rows) + 2)), fill=(0, 0, 0))
         d.text((bx, by), head, font=lf, fill=(255, 255, 255))
