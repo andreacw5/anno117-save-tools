@@ -758,6 +758,8 @@ def extract_results(save, paths, texts_files=None, city_names=None, radius=40, u
     apply_city_names([(r['session'], r['areas']) for r in results], city_names)
     attach_routes(results, trade_routes(data_root), ships, names, gmap)
     apply_unit_names(results, unit_names)
+    military = sorted({gmap[g] for g, x in info.items() if x.get('military') and g in gmap})
+    for r in results: r['military_goods'] = military       # paid for troops and ships, see `assets`
     return results
 
 def cmd_extract(a):
@@ -900,6 +902,13 @@ def boost_order(b):
     """Worst first: the fastest fall; for spare output, a match with an island in need first."""
     return (not b['text'].startswith('spare output'), -b['net']) if b['kind'] == 'surplus' else (b['net'],)
 
+def quiet_goods(e, r):
+    """Military goods (see `assets`) that nobody on the island eats and no factory there uses: their
+    stock only falls because the player spends them on ships and troops, or ships them to a shipyard."""
+    used = {g for g, nd in (e.get('needs') or {}).items() if nd.get('kind') != 'service'}
+    used |= {g for p in e.get('production') or [] for g in (p.get('input_per_minute') or {})}
+    return set(r.get('military_goods') or []) - used
+
 def island_views(cur, prev, humans, alarms):
     """One panel per island of the human players: what is short, what the residents ask for, what is
     overproduced, what is shipped out and brought in. Built from the same data as the alarms."""
@@ -934,10 +943,11 @@ def island_views(cur, prev, humans, alarms):
             for o in mine:
                 if o['area'] == e['area']: continue
                 for g, x in bal[o['area']].items():
-                    if x['net'] is not None: elsewhere[g].append((city_of(o), x['net']))
-            rows = []
+                    if x['net'] is not None and g not in quiet_goods(o, r): elsewhere[g].append((city_of(o), x['net']))
+            rows, quiet = [], quiet_goods(e, r)
             for x in bal[e['area']].values():
-                adv = boost_advice(x, e, elsewhere)
+                if x['good'] in quiet: x = {**x, 'resid': None}     # spent by the player, not by residents
+                adv = None if x['good'] in quiet else boost_advice(x, e, elsewhere)
                 if adv:
                     boost.append({'kind': adv[0], 'text': adv[1], 'good': x['good'], 'net': x['net'],
                                   'stock': st.get(x['good'], 0), 'place': place, 'island': f"{label}-{e['area']}",
@@ -1153,7 +1163,9 @@ def report_data(cur, prev, humans, horizon=60, _inner=False):
                 isl('info', f'overproduction: {full} of {total} production buildings idle, nobody collects their output',
                     'pause or demolish the surplus, or ship it where it is needed', 'overproduction')
             st, made = e.get('storage') or {}, e.get('output_capacity') or {}
+            quiet = quiet_goods(e, r)        # military goods the player spends: no alarm for them
             for g, t in sorted((e.get('stock_trends') or {}).items()):
+                if g in quiet: continue
                 stock, net = st.get(g, 0), t['net_per_minute']
                 drop = t.get('first', stock - net * t['minutes']) - stock
                 if stock > 0 and net <= -0.1 and stock / -net < horizon:
@@ -2074,10 +2086,25 @@ def read_assets(files):
                         fac = {'in': io_('FactoryInputs'), 'out': io_('FactoryOutputs'), 'cycle': txt(fb, 'CycleTime')}
                         a['factory'] = {k: v for k, v in fac.items() if v}
                     nl = el.find('Values/Residence7/NeedsList')
-                    if nl is not None:   # what a house type asks for (rate: unit not confirmed, see docs)
+                    if nl is not None:   # what a house type asks for (rate: per house per minute, see docs)
                         a['needs'] = [{k: v for k, v in (('need', txt(i, 'Need')), ('rate', txt(i, 'NeedConsumptionRate')),
                                                          ('buff_only', txt(i, 'IsOnlyAvailableThroughBuff') == '1')) if v}
                                       for i in nl.findall('Item') if txt(i, 'Need')]
+                    cost_in = [txt(i, 'Ingredient') for i in el.findall('Values/Cost/Costs/Item')
+                               if txt(i, 'Ingredient') and (num(txt(i, 'Amount'), 0) or 0) > 0]
+                    if cost_in: a['cost_in'] = cost_in   # used by `assets` to find the military goods, then dropped
+                    us, ut = el.find('Values/UnitSpawner'), el.find('Values/UnitSpawnerTrigger')
+                    if us is not None or ut is not None:   # unit spawners (camps, hidden ambushes) and their triggers
+                        st = us.findall('Stages/Item') if us is not None else []
+                        sp = {'units': sum(num(txt(s, 'UnitAmount'), 0) for s in st),
+                              'unit_types': sorted({txt(t, 'Unit') for s in st for t in s.findall('UnitTypes/Item')
+                                                    if txt(t, 'Unit')}),
+                              'limit': num(txt(us, 'UnitLimit')),
+                              'radius': num(txt(ut, 'DetectionRadius')),
+                              'cooldown_s': (num(txt(ut, 'Cooldown')) or 0) // 1000 or None,
+                              'triggers': [txt(i, 'UnitSpawner') for i in (ut.findall('AdditionalUnitSpawnerList/Item')
+                                                                          if ut is not None else []) if txt(i, 'UnitSpawner')]}
+                        a['spawner'] = {k: v for k, v in sp.items() if v}
                     nd = el.find('Values/Need')
                     if nd is not None and txt(nd, 'NeedProduct'):
                         a['need'] = {k: v for k, v in (('product', txt(nd, 'NeedProduct')),
@@ -2105,6 +2132,8 @@ def read_texts(files):
     return t
 
 CULTURE_WORDS = {'Tech', 'Need', 'Roman', 'Celtic', 'Egyptian', 'Greco', 'Greco-Roman'}
+MILITARY_TEMPLATES = {'LandUnit', 'NavalUnit', 'ShipModule'}
+MONEY_GUID = 1010017
 
 def need_category(name):
     """Category of a need asset that does not set NeedCategoryType, from its internal name:
@@ -2140,14 +2169,24 @@ def cmd_assets(a):
             for k, v in factory(base_of(x), depth + 1).items(): own.setdefault(k, v)
         return own
 
+    # military goods: paid for land units, ships and ship modules, and by few other templates (ropes,
+    # weapons, armour, sails, horses...); timber, used by aqueducts, institutions and more, is not one
+    mil_uses, other_uses = set(), collections.defaultdict(set)
+    for g, x in assets.items():
+        t = inherited(g, 'template') or ''
+        for i in x.get('cost_in', []):
+            if t in MILITARY_TEMPLATES: mil_uses.add(i)
+            elif not re.match(r'Military|Pirate|DEPRECATED', t): other_uses[i].add(t)
+    military = {int(i) for i in mil_uses if i.isdigit() and int(i) != MONEY_GUID and len(other_uses[i]) < 3}
     out = {}
     for g, x in assets.items():
-        x = {k: v for k, v in x.items() if k not in ('base', 'text_id')}
+        x = {k: v for k, v in x.items() if k not in ('base', 'text_id', 'cost_in')}
+        if g in military: x['military'] = True
         tid = inherited(g, 'text_id')
         local = texts.get(int(tid)) if tid and tid.lstrip('-').isdigit() else texts.get(g)
         if local: x['name_local'] = local
         if inherited(g, 'template'): x['template'] = inherited(g, 'template')
-        for key in ('needs', 'need'):
+        for key in ('needs', 'need', 'spawner'):
             v = inherited(g, key)
             if v: x[key] = v
         if x.get('needs'):               # resolve each need to its good (or public building) right away
@@ -2160,7 +2199,7 @@ def cmd_assets(a):
         if fac:
             x['factory'] = fac
             if 'cycle' not in fac and default_cycle: fac['cycle'] = default_cycle
-        if a.all or 'factory' in x or 'needs' in x or 'need' in x or RE_USEFUL.search(x.get('template') or '') or RE_USEFUL.search(x.get('name') or ''):
+        if a.all or 'factory' in x or 'needs' in x or 'need' in x or 'spawner' in x or 'military' in x or RE_USEFUL.search(x.get('template') or '') or RE_USEFUL.search(x.get('name') or ''):
             out[str(g)] = x
     out = dict(sorted(out.items(), key=lambda kv: int(kv[0])))
     write_json(a.output, out, 1)
@@ -2351,7 +2390,7 @@ def cmd_map(a):
         return ImageFont.load_default()
     humans = {p for p, n in names.items() if n}
     gsm = one(sroot, 'GameSessionManager')
-    pirates, objs = set(), []
+    pirates, objs, spawners = set(), [], []
     for am in area_managers(sroot):
         aid = int(am.name.split('_')[-1]) if re.fullmatch(r'AreaManager_\d+', am.name) else None
         for ob in area_objects(am):
@@ -2364,6 +2403,13 @@ def cmd_map(a):
             smo = one(ob, 'ShipModuleOwner')
             if smo is not None:                                       # warship or civil (cargo, river boat)
                 kind = 'warship' if gn is not None and ship_role(u(gn.value), ship_modules(smo), info, gmap) == 'war' else 'civil'
+            elif one(ob, 'UnitSpawner') is not None or one(ob, 'UnitSpawnerTrigger') is not None:
+                # units appear here: a camp building, a hidden ambush, or a trigger point that wakes other spawners
+                sp = (info.get(u(gn.value)) or {}).get('spawner') or {} if gn is not None else {}
+                kind = ('spawner' if one(ob, 'Building') is not None else
+                        'trigger' if sp.get('triggers') and not sp.get('units') else 'ambush')
+                spawners.append((kind, u(gn.value) if gn is not None else None, x, z, sp))
+                continue
             else:
                 kind = 'unit' if one(ob, 'Unit') is not None else 'building'
             objs.append((kind, owners.get(u(mid.value)) if mid is not None else None, aid, x, z))
@@ -2439,8 +2485,8 @@ def cmd_map(a):
             anchor = ('l' if qa[0] == 0 else 'r' if qa[0] == H else 'm') + ('t' if qa[1] == 0 else 'b' if qa[1] == H else 'm')
             d.text((tx, ty), f"{other.capitalize()}: {', '.join(cities)}", font=lf, fill=c, anchor=anchor,
                    stroke_width=3, stroke_fill=(0, 0, 0))
-    draw_order = {'civil': 0, 'unit': 1, 'warship': 2}                # warships on top
     k = max(1.0, H / max(a.width or 1600, 1))                          # icon scale: same size after resizing
+    draw_order = {'civil': 0, 'unit': 1, 'warship': 2}                # warships on top
     for kind, o, aid, x, z in sorted((ob for ob in objs if ob[0] in draw_order), key=lambda ob: draw_order[ob[0]]):
         c = color.get(o, grey); y = H - z
         # military icons are larger and drawn over a black shape, so they stand out on buildings of the same
@@ -2465,11 +2511,42 @@ def cmd_map(a):
         if e['owner'] is not None:                                     # owner under the island name
             d.text((x, y - 22 + gap), str(label_of(e['owner'])), font=fs, fill=c, anchor='mt',
                    stroke_width=2, stroke_fill=(0, 0, 0))
+    # drawn over the island names, which would hide them
+    # unit spawners: camps (filled red diamonds), hidden ambushes (hollow orange diamonds) and the trigger
+    # points that set them off (orange rings as wide as the trigger radius, with lines to what they wake up)
+    amber, sf = (255, 150, 0), font(max(11, H // 130))
+    by_guid = collections.defaultdict(list)
+    for kind, g, x, z, sp in spawners: by_guid[g].append((x, z))
+    for kind, g, x, z, sp in spawners:
+        if kind != 'trigger': continue
+        for t in sp.get('triggers', []):
+            if not t.isdigit() or not by_guid.get(int(t)): continue
+            tx, tz = min(by_guid[int(t)], key=lambda p: math.dist(p, (x, z)))
+            d.line((x, H - z, tx, H - tz), fill=(0, 0, 0), width=round(4 * k))
+            d.line((x, H - z, tx, H - tz), fill=amber, width=round(2 * k))
+    for kind, g, x, z, sp in spawners:
+        y = H - z
+        if kind == 'trigger':
+            r = max(sp.get('radius') or 0, 5 * k)
+            d.ellipse((x - r - 2 * k, y - r - 2 * k, x + r + 2 * k, y + r + 2 * k), outline=(0, 0, 0), width=round(4 * k))
+            d.ellipse((x - r, y - r, x + r, y + r), outline=amber, width=round(2 * k))
+            continue
+        s = 10 * k if kind == 'spawner' else 6 * k
+        diamond = lambda s: [(x, y - s), (x + s, y), (x, y + s), (x - s, y)]
+        d.polygon(diamond(s + 3 * k), fill=(0, 0, 0))
+        if kind == 'spawner': d.polygon(diamond(s), fill=(255, 60, 60))
+        else: d.polygon(diamond(s), outline=amber, width=round(2 * k))
+        if sp.get('units'):                                           # how many units it can send in all
+            d.text((x + s + 4 * k, y), str(sp['units']), font=sf, anchor='lm',
+                   fill=(255, 60, 60) if kind == 'spawner' else amber, stroke_width=2, stroke_fill=(0, 0, 0))
     if not a.legend:
         rows = []
     else:
         rows = list({label_of(p): (color[p], label_of(p)) for p in present if p in color}.values())
         rows += [((255, 60, 60), 'pirate structures (x)'), (grey, 'nobody / unknown')]
+        if spawners:
+            rows += [((255, 60, 60), 'unit camps (filled diamonds, number = units it can send)'),
+                     ((255, 150, 0), 'hidden ambushes (hollow diamonds) and their trigger points (rings)')]
         lf = font(max(14, H // 100)); lh = lf.size + 8 if hasattr(lf, 'size') else 20
         bx, by = 20, 20
         head = f'{label}: warships = black-rimmed triangles, civil ships = white-rimmed circles, troops = squares'
@@ -2483,7 +2560,8 @@ def cmd_map(a):
     out = a.output or f'{label}_map.png'
     im.save(out)
     print(f'{label}: {len(tiles)} tiles, {sum(k == "warship" for k, *_ in objs)} warships, '
-          f'{sum(k == "civil" for k, *_ in objs)} civil ships, {sum(k == "unit" for k, *_ in objs)} units -> {out}')
+          f'{sum(k == "civil" for k, *_ in objs)} civil ships, {sum(k == "unit" for k, *_ in objs)} units, '
+          f'{len(spawners)} unit spawners -> {out}')
 
 def main():
     ap = argparse.ArgumentParser(description='Anno 117: Pax Romana save game and game data tools.')

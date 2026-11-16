@@ -36,9 +36,21 @@ Language archives such as `en_us0.rda` only hold voice-over sound banks; they ar
    resolved to the good or public building it stands for (`Values/Need/NeedProduct`) and its
    category (`NeedCategoryType`, or the first word of the need's internal name after the culture
    words, e.g. *Need Roman Celtic Public Market* → `Public`), with `rate`
-   (`NeedConsumptionRate`, unit not confirmed; absent for services such as market or tavern) and
+   (`NeedConsumptionRate`, per house per minute: it matches the per-house values published by
+   anno117.tools; absent for services such as market or tavern) and
    `buff_only` (`IsOnlyAvailableThroughBuff`). The list holds every need a house type can have,
    optional ones and ones not unlocked yet included.
+   Unit spawners (`Values/UnitSpawner`, `Values/UnitSpawnerTrigger`: pirate camps, hidden ambushes
+   and their trigger points) get `spawner`: `units` (sum of `UnitAmount` over all stages),
+   `unit_types`, `limit` (`UnitLimit`, units alive at once), `radius` (`DetectionRadius`),
+   `cooldown_s` (`Cooldown`) and `triggers` (the spawners a trigger point wakes up,
+   `AdditionalUnitSpawnerList`).
+   Goods get `military: true` when land units, ships or ship modules pay for them
+   (`Values/Cost/Costs`, any amount above zero) and fewer than three other kinds of asset do
+   (military buildings and pirate assets aside). In Anno 117 these are weapons, armour, ropes,
+   sails, horses, bronze, chariots and reeds; timber is not one, since aqueducts, institutions and
+   other buildings use it too. `extract` lists their names in `military_goods`, and the report
+   uses them.
    Without `--all`, only naval, military, participant, session, fertility, city status,
    production, house and need assets are kept.
 4. `extract` then picks `guid_names.json` up automatically (`--names` to point elsewhere).

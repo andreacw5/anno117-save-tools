@@ -254,8 +254,9 @@ across saves, also when it sails to another province (74 ships compared over fou
 ### Residents' consumption (not computed)
 
 Each house type lists its needs in `assets.xml` under `Values/Residence7/NeedsList` (`Need` +
-`NeedConsumptionRate`), and each `Need` asset points to its good (`Values/Need/NeedProduct`). The
-unit of `NeedConsumptionRate` is not confirmed: read as "per resident per minute" it gives about 5×
+`NeedConsumptionRate`), and each `Need` asset points to its good (`Values/Need/NeedProduct`).
+`NeedConsumptionRate` is per house per minute (the values match those anno117.tools publishes per
+house); read as "per resident per minute" it gives about 5×
 what the game's own production and full warehouses suggest, and Anno 117's optional needs (one
 good *or* another satisfies the same need) split consumption between goods. Until this is
 verified, `extract` does not include residents in `goods_per_minute`. The warehouse history

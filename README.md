@@ -11,7 +11,10 @@ No dependencies, Python 3.8 or newer.
 - **`map`**: draw a province as a PNG, from the save's map template and the game's own map tiles,
   with islands, buildings, ships and units coloured by owner (warships as black-rimmed triangles, civil and cargo
   ships as white-rimmed circles, troops as black-rimmed squares, all scaled to stay readable) and
-  pirate structures marked.
+  pirate structures marked. Unit spawners are drawn too: camps as filled red diamonds, hidden ambushes
+  as hollow orange diamonds (both with how many units they can send) and the trigger points that set
+  ambushes off as orange rings, with lines to the ambushes they wake up. Needs a `guid_names.json`
+  from a recent `assets` run.
 - **`report`**: one HTML page (and optionally Markdown) on your state. It opens with the goods
   running dry, placed on a 0–60 minute scale with a countdown each; then what changed since an
   earlier save, the other alarms grouped by kind (idle buildings, workforce shortages, falling

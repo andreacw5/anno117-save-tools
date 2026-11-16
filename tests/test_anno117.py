@@ -492,6 +492,42 @@ class TestRegressions(TempDirMixin, unittest.TestCase):
         self.assertTrue(needs['52']['buff_only'])
         self.assertEqual(m['31']['needs'], m['30']['needs'])         # inherited from the base asset
 
+    def test_unit_spawners(self):
+        xml = ('<AssetList><Asset><Template>MilitaryTowerUnitSpawner</Template><Values><Standard><GUID>60</GUID></Standard>'
+               '<UnitSpawner><Stages><Item><UnitAmount>6</UnitAmount><UnitTypes><Item><Unit>70</Unit></Item>'
+               '<Item><Unit>71</Unit></Item></UnitTypes></Item><Item><UnitAmount>2</UnitAmount><UnitTypes>'
+               '<Item><Unit>70</Unit></Item></UnitTypes></Item></Stages><UnitLimit>6</UnitLimit></UnitSpawner>'
+               '<UnitSpawnerTrigger/></Values></Asset>'
+               '<Asset><Template>UnitSpawnerTrigger</Template><Values><Standard><GUID>61</GUID></Standard>'
+               '<UnitSpawner/><UnitSpawnerTrigger><DetectionRadius>5</DetectionRadius><Cooldown>14400000</Cooldown>'
+               '<AdditionalUnitSpawnerList><Item><UnitSpawner>60</UnitSpawner></Item></AdditionalUnitSpawnerList>'
+               '</UnitSpawnerTrigger></Values></Asset>'
+               '<Asset><BaseAssetGUID>60</BaseAssetGUID><Values><Standard><GUID>62</GUID></Standard></Values></Asset>'
+               '</AssetList>')
+        m = self.assets_run(xml, '<Properties/>')
+        self.assertEqual(m['60']['spawner'], {'units': 8, 'unit_types': ['70', '71'], 'limit': 6})
+        self.assertEqual(m['61']['spawner'], {'radius': 5, 'cooldown_s': 14400, 'triggers': ['60']})
+        self.assertEqual(m['62']['spawner'], m['60']['spawner'])     # inherited from the base asset
+
+    def test_military_goods(self):
+        xml = ('<AssetList>'
+               '<Asset><Template>LandUnit</Template><Values><Standard><GUID>80</GUID></Standard><Cost><Costs>'
+               '<Item><Ingredient>1010017</Ingredient><Amount>5000</Amount></Item>'
+               '<Item><Ingredient>90</Ingredient><Amount>10</Amount></Item>'
+               '<Item><Ingredient>91</Ingredient><Amount>5</Amount></Item>'
+               '<Item><Ingredient>92</Ingredient></Item></Costs></Cost></Values></Asset>'
+               + ''.join(f'<Asset><Template>Building{i}</Template><Values><Standard><GUID>{81 + i}</GUID></Standard>'
+                         '<Cost><Costs><Item><Ingredient>91</Ingredient><Amount>3</Amount></Item></Costs></Cost>'
+                         '</Values></Asset>' for i in range(3))
+               + '<Asset><Template>Product</Template><Values><Standard><GUID>90</GUID></Standard></Values></Asset>'
+               '<Asset><Template>Product</Template><Values><Standard><GUID>91</GUID></Standard></Values></Asset>'
+               '</AssetList>')
+        m = self.assets_run(xml, '<Properties/>')
+        self.assertTrue(m['90'].get('military'))                    # only units pay with it
+        self.assertNotIn('military', m['91'])                        # three building types use it too: timber
+        self.assertNotIn('1010017', [k for k, v in m.items() if v.get('military')])   # money is not a good
+        self.assertNotIn('cost_in', m['80'])
+
     def test_num(self):
         self.assertEqual([A.num('3'), A.num('0.5'), A.num('2.0'), A.num(None, 1), A.num('x', 1)], [3, 0.5, 2, 1, 1])
 
@@ -783,6 +819,15 @@ class TestReport(TempDirMixin, unittest.TestCase):
         self.assertEqual(cards[('island', 'Roma (latium)')]['level'], 'high')
         self.assertIn('nothing brings it here: add a route or build production', [i['hint'] for i in cards[('island', 'Roma (latium)')]['items']])
         self.assertEqual(rep['groups'][0]['level'], 'high')
+
+    def test_military_goods_are_quiet_unless_used_here(self):
+        s = self.session()
+        s['military_goods'] = ['Bread']                        # Bread drains fast in this fixture
+        text = '\n'.join(a['text'] for a in A.report_data([s], None, {41})['alarms'])
+        self.assertNotIn('Bread:', text)                       # nobody here needs it: the player spends it
+        s['areas'][0]['needs'] = {'Bread': {'kind': 'good', 'houses': ['Plebs house']}}
+        text = '\n'.join(a['text'] for a in A.report_data([s], None, {41})['alarms'])
+        self.assertIn('Bread: 10 left', text)                  # residents eat it: the alarm stays
 
     def test_lost_island_and_no_previous(self):
         rep = A.report_data([self.session(owner=99)], [self.session()], {41})
