@@ -12,11 +12,13 @@ No dependencies, Python 3.8 or newer.
   with islands, buildings, ships and units coloured by owner (warships as black-rimmed triangles, civil and cargo
   ships as white-rimmed circles, troops as black-rimmed squares, all scaled to stay readable) and
   pirate structures marked.
-- **`report`**: one HTML page (and optionally Markdown) on your state: alarms first (goods running
-  out, idle buildings, workforce shortages, routes without ships or stock, losses since an earlier
-  save) grouped per island and per route with a hint, warships, civil ships and troops per player
-  across all provinces, then per province your islands, players, fleets, troops, routes and
-  warehouses. Traders and imperial envoys (NPCs that cannot be attacked) are left out.
+- **`report`**: one HTML page (and optionally Markdown) on your state. It opens with the goods
+  running dry, placed on a 0–60 minute scale with a countdown each; then what changed since an
+  earlier save, the other alarms grouped by kind (idle buildings, workforce shortages, falling
+  income, routes without ships or stock) with a hint, a summary per province with the warships
+  around you (pirates in red), forces per player across all provinces, and the full per-province
+  ledgers: your islands, players, fleets, troops, routes, warehouses and the map. Traders and
+  imperial envoys (NPCs that cannot be attacked) are left out.
 - **`list`**: browse the contents of `.rda` archives.
 - **`guid-table`**: render the GUID map as a Markdown page.
 
@@ -76,7 +78,7 @@ Output (`sessions/<province>.json`, abridged):
 | `extract <save> [-o DIR] [--names FILE]… [--texts FILE]… [--city-names FILE] [--radius R]` | One JSON per session. `--city-names` takes a JSON `{"<area id>": "name"}` with the names you gave your cities (the save does not link them to the island). `--texts` takes a `texts_<lang>.xml` (as extracted by `assets`) to name the islands' default cities. `--names` can be repeated to layer maps (e.g. your own hand-written guesses, then the official `guid_names.json`): later files win. `--radius` sets the distance used to group ships into squadrons (default 40). |
 | `assets <path> [-o FILE] [--lang LANG] [--all] [--extract-dir DIR]` | Finds `assets*.xml` and `texts_<LANG>.xml` in the `.rda` archives (or in a folder of extracted `.xml`) and writes `guid_names.json`. Without `--all` it keeps only naval, military, participant, session, fertility, city status and production assets. Production buildings also get `factory` (inputs, outputs, cycle time), read from `assets.xml` and `properties.xml`. |
 | `map <save> <maindata> [--session S] [-o FILE] [--names FILE]… [--texts FILE]… [--width W] [--color WHO=COLOUR]… [--legend] [--no-routes]` | PNG map of one province (default `nile`). Each island shows its name and, below, its owner; human players' trade routes between islands of the province are dashed lines (thicker when several routes share a leg; `--no-routes` hides them); `--legend` adds a legend box in the top-left corner. `--color` sets a participant's colour by name or GUID (`--color "Dorian=yellow" --color 41=#2ecc40`); human players default to gold, pirates are always red. Needs **Pillow** (`pip install pillow`), the only command with a dependency. |
-| `report <save or extract DIR> [--compare PREVIOUS] [-o FILE.html] [--md FILE.md] [--maps DIR] [--player WHO]… [--horizon MIN] [--stale MIN]` | Self-contained HTML page (and optional Markdown) made to stay open next to the game: alarms per island, route and player sorted by severity, NEW since the previous save, an island view (needs, overproduction, exports, imports), forces per player, per-province tables. It reloads itself when you regenerate it. Takes a save (with the same `--names`/`--texts`/`--city-names` options as `extract`) or a folder written by `extract`. Details: [docs/report.md](docs/report.md). |
+| `report <save or extract DIR> [--compare PREVIOUS] [-o FILE.html] [--md FILE.md] [--maps DIR] [--player WHO]… [--horizon MIN] [--stale MIN]` | Self-contained HTML page (and optional Markdown) made to stay open next to the game: goods running dry on a minute scale, alarms grouped by kind and sorted by severity, NEW since the previous save, a summary per province with pirates marked, an island view (needs, overproduction, exports, imports), forces per player, per-province tables. It reloads itself when you regenerate it. Takes a save (with the same `--names`/`--texts`/`--city-names` options as `extract`) or a folder written by `extract`. Details: [docs/report.md](docs/report.md). |
 | `list <file.rda or dir> [FILTER]` | Lists archive contents, optionally filtered by substring. |
 | `guid-table <guid_names.json> [-o FILE] [--template T]… [--title TEXT]` | Writes a Markdown page (default `docs/guids.md`), one table per template; `--template` keeps only those templates, in that order. `docs/guids.md` is made with `--template LandUnit --template NavalUnit --template ShipModule --template MilitaryTowerUnit` from an English map. |
 

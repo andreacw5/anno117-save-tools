@@ -866,14 +866,14 @@ def island_views(cur, prev, humans, alarms):
 def report_data(cur, prev, humans, horizon=60, _inner=False):
     """Alarms and tables of the report, as plain data (rendered as Markdown or HTML)."""
     prev_s = {r['session']: r for r in prev or []}
-    alarms, sections, seen_routes = [], [], set()
+    alarms, sections, seen_routes, drains = [], [], set(), []
     is_human = lambda o: o in humans
     kinds = {k: v for r in cur + (prev or []) for k, v in (r.get('participant_kinds') or {}).items()}
     npc = lambda o: kinds.get(str(o)) == 'npc'          # traders and envoys: left out of players and forces
-    def alarm(level, kind, place, text, hint='', key=None, provs=(), vs_prev=False):
+    def alarm(level, kind, place, text, hint='', key=None, provs=(), vs_prev=False, cat=''):
         code = f"{kind}|{key or place}|{re.sub(r'[-+~0-9.,]+', '#', text)}"   # stable across saves: no numbers
         alarms.append({'level': level, 'kind': kind, 'place': place, 'key': key or place, 'text': text, 'hint': hint,
-                       'code': code, 'provs': list(provs), 'vs_prev': vs_prev})   # vs_prev: a change between saves
+                       'code': code, 'provs': list(provs), 'vs_prev': vs_prev, 'cat': cat})   # vs_prev: a change between saves
     details = {}                                    # (kind, place) -> line under the place's name
     area_at = {(x['session'], e['area']): e for x in cur for e in x['areas']}
     for r in cur:
@@ -884,52 +884,59 @@ def report_data(cur, prev, humans, horizon=60, _inner=False):
         # ---- islands of the human players
         for e in mine:
             place, pe = f'{city_of(e)} ({label})', old_area.get(e['area'])
-            isl = lambda level, text, hint='', place=place, d=False: alarm(level, 'island', place, text, hint,
-                                                                          provs=[label], vs_prev=d)
+            isl = lambda level, text, hint='', cat='', place=place, d=False: alarm(level, 'island', place, text, hint,
+                                                                                  provs=[label], vs_prev=d, cat=cat)
             details[('island', place)] = ', '.join(x for x in (e.get('city_status'), f"{e['population']:,} residents"
                                                      if e.get('population') else None) if x)
             for wf, sat in (e.get('workforce_saturation') or {}).items():
                 if sat < 0.9: isl('medium', f'{wf}: only {sat:.0%} of the demand is met',
-                                  'build houses for this workforce or close buildings that need it')
+                                  'build houses for this workforce or close buildings that need it', 'workforce')
             total, idle = production_counts(e)
             full, other = e.get('idle_output_full', 0), e.get('idle_other_reasons') or {}
             if sum(other.values()) >= 3:
                 why = ', '.join(f'{k} ×{n}' for k, n in list(other.items())[:3])
                 isl('medium', f'{sum(other.values())} production buildings stopped: {why}',
-                    'missing inputs or paused buildings: check their supply chain')
+                    'missing inputs or paused buildings: check their supply chain', 'production')
             if total >= 4 and full >= total / 2:
                 isl('info', f'overproduction: {full} of {total} production buildings idle, nobody collects their output',
-                    'pause or demolish the surplus, or ship it where it is needed')
+                    'pause or demolish the surplus, or ship it where it is needed', 'overproduction')
             st, made = e.get('storage') or {}, e.get('output_capacity') or {}
             for g, t in sorted((e.get('stock_trends') or {}).items()):
                 stock, net = st.get(g, 0), t['net_per_minute']
                 drop = t.get('first', stock - net * t['minutes']) - stock
-                if stock > 0 and net <= -0.1 and drop >= max(10, 0.2 * t['max']) and stock / -net < horizon:
-                    mins = stock / -net
+                if stock > 0 and net <= -0.1 and stock / -net < horizon:
+                    mins = stock / -net     # every draining good; only a big enough drop is an alarm
+                    dr = {'good': g, 'city': city_of(e), 'island': f"{label}-{e['area']}", 'prov': label,
+                          'stock': stock, 'rate': net, 'mins': mins, 'peak': max(t.get('max') or 0, stock), 'alarm': None}
+                    drains.append(dr)
+                    if drop < max(10, 0.2 * t['max']): continue
                     src, dst = (e.get('receives') or {}).get(g), (e.get('supplies') or {}).get(g)
                     isl('high' if mins < horizon / 3 else 'medium',
                         f'{g}: {stock} left, down {drop:g} in {t["minutes"]:g} min, empty in ~{mins:.0f} min',
                         f'arrives from {", ".join(src)}: add ships or raise the amount on that route' if src else
                         f'shipped to {", ".join(dst)}: lower the amount on that route or build more' if dst else
-                        'produced here: build more' if g in made else 'nothing brings it here: add a route or build production')
+                        'produced here: build more' if g in made else 'nothing brings it here: add a route or build production',
+                        'stock')
+                    dr['alarm'] = alarms[-1]
                 elif not stock and t['max'] >= 10 and t['outflow_per_minute'] and g not in made:
                     isl('medium', f'{g}: ran out in the last {t["minutes"]:g} min (it was {t["max"]})',
-                        'consumed here but not produced: check the routes that should bring it')
+                        'consumed here but not produced: check the routes that should bring it', 'empty')
             if pe:
                 p0, p1 = pe.get('population') or 0, e.get('population') or 0
                 if p0 - p1 >= max(50, p0 * 0.02):
-                    isl('high', f'population fell from {p0:,} to {p1:,}', 'look for unmet needs or missing goods above', d=True)
+                    isl('high', f'population fell from {p0:,} to {p1:,}', 'look for unmet needs or missing goods above',
+                        'population', d=True)
                 i0, i1 = pe.get('income_per_minute'), e.get('income_per_minute')
                 if i0 and i1 is not None and i0 - i1 > abs(i0) * 0.1:
-                    isl('medium', f'income fell from {i0:,} to {i1:,} per minute', d=True)
+                    isl('medium', f'income fell from {i0:,} to {i1:,} per minute', cat='income', d=True)
         for e in r['areas']:
             pe = old_area.get(e['area'])
             if pe and is_human(pe.get('owner')) and not is_human(e.get('owner')):
                 alarm('high', 'island', f'{city_of(pe)} ({label})', f'lost: now owned by {e.get("owner_name") or "nobody"}',
-                      provs=[label], vs_prev=True)
+                      provs=[label], vs_prev=True, cat='owner')
             if pe and is_human(e.get('owner')) and not is_human(pe.get('owner')):
                 alarm('info', 'island', f'{city_of(e)} ({label})', f'new island, was {pe.get("owner_name") or "unowned"}',
-                      provs=[label], vs_prev=True)
+                      provs=[label], vs_prev=True, cat='owner')
         # ---- trade routes of the human players
         routes = [rt for rt in r.get('trade_routes', []) if is_human(rt['owner'])]
         for rt in routes:
@@ -940,7 +947,8 @@ def report_data(cur, prev, humans, horizon=60, _inner=False):
             details[('route', key)] = (' → '.join(st['city'] or f"area {st['area']}" for st, _ in stops)
                                          + f' · {len(rt["ships"])} ship' + ('' if len(rt['ships']) == 1 else 's'))
             rprov = sorted({st['session'] for st in rt['stations'] if st.get('session')})
-            ra = lambda level, text, hint='', place=place, key=key, rprov=rprov: alarm(level, 'route', place, text, hint, key, rprov)
+            ra = lambda level, text, hint='', cat='route', place=place, key=key, rprov=rprov: alarm(
+                level, 'route', place, text, hint, key, rprov, cat=cat)
             goods = sorted({g for st in rt['stations'] for g in st['goods']})
             if not rt['ships']: ra('high', 'no ships assigned', 'assign ships or delete the route')
             if not goods: ra('medium', 'no goods set at any stop', 'the ships sail empty: set goods or delete the route')
@@ -963,7 +971,7 @@ def report_data(cur, prev, humans, horizon=60, _inner=False):
             if at_lim:                      # one line per route, however many goods
                 ra('info', f'{len(at_lim)} good{"s" if len(at_lim) > 1 else ""} already at the storage limit: '
                            + '; '.join(at_lim),
-                   'if the route unloads them there, nothing is delivered: lower the amounts or reuse the ships')
+                   'if the route unloads them there, nothing is delivered: lower the amounts or reuse the ships', 'limit')
         # ---- tables
         tables = []
         rows = []
@@ -1045,7 +1053,16 @@ def report_data(cur, prev, humans, horizon=60, _inner=False):
                                'headers': ['Good', 'Stock', 'Trend/min', 'Out/min', 'In/min', 'Production capacity/min', ''],
                                'rows': rows})
         t0, t1 = (pr or {}).get('session_time_ms'), r.get('session_time_ms')
-        sections.append({'id': label, 'title': label.capitalize(), 'tables': tables,
+        sea = sorted(((p['name'] or 'unknown owner', (forces(p)[0] or 0), is_human(p['participant']),
+                       kinds.get(str(p['participant'])) == 'pirate') for p in r['participants']
+                      if p['participant'] is not None and not npc(p['participant'])
+                      and ((forces(p)[0] or 0) > 0 or is_human(p['participant']))), key=lambda x: (not x[2], -x[1]))
+        summary = {'islands': len(mine), 'pop': sum(e.get('population') or 0 for e in mine),
+                   'inc': sum(e.get('income_per_minute') or 0 for e in mine),
+                   'pop_prev': sum((old_area.get(e['area']) or {}).get('population') or 0 for e in mine) if pr else None,
+                   'inc_prev': sum((old_area.get(e['area']) or {}).get('income_per_minute') or 0 for e in mine) if pr else None,
+                   'top': (city_of(mine[0]), mine[0].get('population') or 0) if mine else None, 'sea': sea}
+        sections.append({'id': label, 'title': label.capitalize(), 'tables': tables, 'summary': summary,
                          'elapsed_min': (t1 - t0) / 60000 if t0 and t1 else None})
     # ---- all provinces together: forces per participant
     total, total_before, pname = {}, {}, {}
@@ -1068,7 +1085,8 @@ def report_data(cur, prev, humans, horizon=60, _inner=False):
             for i, what, level in ((0, 'warships', 'high'), (1, 'civil ships', 'medium'), (2, 'troops', 'high')):
                 if a[i] is not None and b[i] is not None and a[i] < b[i]:
                     alarm(level, 'player', pname[o], f'{b[i] - a[i]} {what} fewer than in the previous save '
-                                                     f'({b[i]} → {a[i]})', 'lost in battle, sold or disbanded', vs_prev=True)
+                                                     f'({b[i]} → {a[i]})', 'lost in battle, sold or disbanded', vs_prev=True,
+                      cat='forces')
     if rows:
         sections.insert(0, {'id': 'forces', 'title': 'All provinces', 'elapsed_min': None, 'tables': [{
             'title': 'Forces per player', 'headers': ['Player', 'Warships', 'Civil ships', 'Troops', 'Present in'],
@@ -1089,7 +1107,9 @@ def report_data(cur, prev, humans, horizon=60, _inner=False):
     cards = sorted(groups.values(), key=lambda g: (order[g['level']], not any(i.get('new') for i in g['items']),
                                                    -sum(order[i['level']] < 2 for i in g['items'])))
     return {'save': cur[0].get('save'), 'previous': (prev or [{}])[0].get('save'), 'resolved': resolved,
-            'alarms': alarms, 'groups': cards, 'sections': sections,
+            'horizon': horizon, 'alarms': alarms, 'groups': cards, 'sections': sections, 'drains': sorted(drains, key=lambda d: d['mins']),
+            'hostile': sorted({p['name'] for r in cur for p in r['participants']
+                               if p['name'] and kinds.get(str(p['participant'])) == 'pirate'}),
             'islands': [] if _inner else island_views(cur, prev, humans, alarms)}
 
 def hints(card, seen=None):
@@ -1142,243 +1162,455 @@ def elapsed_text(m):
             + (' The compared save is the newer one.' if m < 0 else ''))
 
 HTML_STYLE = """
-:root{--bg:#14130f;--panel:#1e1d18;--text:#ece8de;--muted:#a39d90;--line:#36342b;--accent:#e08a57;
---high:#ff8a80;--high-bg:#3a1714;--medium:#f2c14e;--medium-bg:#352a0e;--info:#8cbcf5;--info-bg:#132739;--new:#7ee2a8}
-:root[data-theme=light]{--bg:#f6f4ef;--panel:#fff;--text:#1d1b16;--muted:#6b665c;--line:#e2ddd2;--accent:#8a3b12;
---high:#b42318;--high-bg:#fde8e6;--medium:#9a6700;--medium-bg:#fff4d6;--info:#1f5fa8;--info-bg:#e6f0fb;--new:#127a3f}
-*{box-sizing:border-box}html{scroll-padding-top:64px}body{margin:0;background:var(--bg);color:var(--text);
-font:14px/1.45 system-ui,-apple-system,"Segoe UI",sans-serif}
-main{max-width:1200px;margin:0 auto;padding:8px 12px 40px}
-.bar{position:sticky;top:0;z-index:5;background:var(--bg);border-bottom:1px solid var(--line);padding:6px 12px;
-display:flex;flex-wrap:wrap;gap:6px 10px;align-items:center}
-.bar .title{font-weight:700}.bar .save{color:var(--muted);font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:40ch}
-.bar .grow{flex:1}.age{font-size:12px;color:var(--muted)}.age.stale{color:var(--medium);font-weight:600}
-button{font:inherit;font-size:12px;color:var(--text);background:var(--panel);border:1px solid var(--line);
-border-radius:999px;padding:2px 10px;cursor:pointer}button:hover{border-color:var(--muted)}
-button[aria-pressed=false]{background:transparent;color:var(--muted);border-style:dashed}
-button:disabled{opacity:.35;cursor:default}
+/* A posted daily bulletin: what runs dry first on a clepsydra scale, then what changed, what needs a hand,
+   the provinces, the forces, and the full ledgers. Dark by default (it sits next to the game). */
+:root{--ground:#17140f;--slab:#211d17;--slab-2:#2a251d;--rule:#3b3428;--ink:#ede6d8;--ink-2:#b4aa97;--ink-3:#8a806f;
+--ochre:#d1a24a;--ochre-ink:#17140f;--high:#ef6a55;--high-bg:#3b1a14;--medium:#e9b949;--medium-bg:#352a12;
+--info:#8fb3e8;--info-bg:#162436;--new:#6fc7a8;color-scheme:dark;
+--display:"Marcellus SC","Trajan Pro","Palatino Linotype","Book Antiqua",Palatino,Georgia,serif;
+--text:"Segoe UI Variable Text","Segoe UI",system-ui,-apple-system,"Helvetica Neue",sans-serif}
+:root[data-theme=light]{--ground:#ebe4d6;--slab:#f7f2e8;--slab-2:#e2d9c7;--rule:#cfc3ad;--ink:#211b12;--ink-2:#5c5243;
+--ink-3:#756a58;--ochre:#8c5f12;--ochre-ink:#fff8ea;--high:#a8291b;--high-bg:#f6dcd5;--medium:#8a5d00;--medium-bg:#f5e7c4;
+--info:#2d5a9e;--info-bg:#e1eaf7;--new:#1f7a5c;color-scheme:light}
+*{box-sizing:border-box}html{scroll-padding-top:100px;scrollbar-color:var(--rule) var(--ground)}
+body{margin:0;background:var(--ground);color:var(--ink);font:14px/1.45 var(--text);font-variant-numeric:tabular-nums}
+::selection{background:var(--ochre);color:var(--ochre-ink)}
+:focus-visible{outline:2px solid var(--ochre);outline-offset:2px;border-radius:3px}
+.wrap,main{max-width:1480px;margin:0 auto;padding-left:max(16px,env(safe-area-inset-left,0px));
+padding-right:max(16px,env(safe-area-inset-right,0px))}
+.bar{position:sticky;top:0;z-index:5;background:var(--ground);border-bottom:1px solid var(--rule)}
+.bar .wrap{display:flex;flex-wrap:wrap;align-items:center;gap:6px 12px;padding-block:8px}
+.bar .r2{padding-block:0 8px}
+.mark{font:21px/1 var(--display);font-variant:small-caps;letter-spacing:.07em;color:var(--ochre)}
+.save{display:flex;flex-direction:column;min-width:0;max-width:52ch;font-size:12px;color:var(--ink-2);line-height:1.3}
+.save b{color:var(--ink);font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.grow{flex:1}.age{font-size:12px;color:var(--ink-2)}.age.stale{color:var(--medium);font-weight:600}
+.chips{display:flex;flex-wrap:wrap;gap:4px;align-items:center}.chips+.chips{padding-left:8px;border-left:1px solid var(--rule)}
+button{font:600 12px/1 var(--text);color:var(--ink-2);background:transparent;border:1px solid var(--rule);
+border-radius:999px;padding:6px 11px;cursor:pointer}
+button:hover{color:var(--ink);border-color:var(--ink-3)}button:disabled{opacity:.35;cursor:default}
+button.prov,.seg button{text-transform:uppercase;letter-spacing:.05em}
+button.prov[aria-pressed=true],.seg button[aria-pressed=true]{background:var(--ochre);border-color:var(--ochre);color:var(--ochre-ink)}
+button.lvl[aria-pressed=false],#onlynew[aria-pressed=false]{border-style:dashed}
 button.lvl.high[aria-pressed=true]{color:var(--high);background:var(--high-bg);border-color:var(--high)}
 button.lvl.medium[aria-pressed=true]{color:var(--medium);background:var(--medium-bg);border-color:var(--medium)}
 button.lvl.info[aria-pressed=true]{color:var(--info);background:var(--info-bg);border-color:var(--info)}
-button#onlynew[aria-pressed=true]{color:var(--new);border-color:var(--new)}
-button.prov[aria-pressed=true],.seg button[aria-pressed=true]{border-color:var(--accent);color:var(--accent)}
-.seg{display:inline-flex}.seg button{border-radius:0;border-style:solid}.seg button:first-child{border-radius:999px 0 0 999px}
-.seg button:last-child{border-radius:0 999px 999px 0;margin-left:-1px}
-:focus-visible{outline:2px solid var(--accent);outline-offset:2px}::selection{background:var(--accent);color:var(--bg)}
-html{color-scheme:dark;scrollbar-color:var(--line) var(--bg)}:root[data-theme=light]{color-scheme:light}
-h2{font-size:17px;margin:0;color:var(--accent);display:inline}.sec{margin-top:18px}
-.sec>summary{cursor:pointer;padding:6px 0;list-style-position:inside}
-h3{font-size:14px;margin:14px 0 6px}.muted{color:var(--muted)}
-.cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(min(320px,100%),1fr));gap:8px;margin-top:8px}
-.card{background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:6px 10px;scroll-margin-top:64px}
-.card[data-level=high]{border-color:var(--high);background:linear-gradient(var(--high-bg),var(--panel) 40px)}
-.card.cur{outline:2px solid var(--accent);outline-offset:1px}
-.head{display:flex;gap:8px;align-items:baseline;flex-wrap:wrap}.place{font-weight:700}
-button.place{font:inherit;font-weight:700;color:var(--text);background:none;border:0;border-radius:3px;padding:0;
-text-decoration:underline dotted;text-underline-offset:3px}button.place:hover{color:var(--accent)}
-.kind{font-size:11px;text-transform:uppercase;color:var(--muted)}.detail{font-size:12px;color:var(--muted)}
-.card ul{list-style:none;padding:0;margin:4px 0 0;display:grid;gap:4px}
-.card li{padding-left:12px;position:relative}.card li::before{content:"";position:absolute;left:0;top:.55em;
-width:6px;height:6px;border-radius:50%;background:var(--info)}
-.card li[data-level=high]::before{background:var(--high)}.card li[data-level=medium]::before{background:var(--medium)}
-.hint{font-size:12px;color:var(--muted)}.new{font-size:10px;font-weight:700;color:var(--new);border:1px solid var(--new);
-border-radius:4px;padding:0 4px;margin-right:4px}
-.wrap{overflow-x:auto;background:var(--panel);border:1px solid var(--line);border-radius:6px}
-table{border-collapse:collapse;width:100%;font-size:13px}th,td{padding:4px 8px;text-align:left;
-border-bottom:1px solid var(--line);white-space:nowrap}td.num,th.num{text-align:right;font-variant-numeric:tabular-nums}
-th{cursor:pointer;user-select:none;background:var(--panel)}th:hover{color:var(--accent)}
-th[aria-sort=ascending]::after{content:" ▲";font-size:9px}th[aria-sort=descending]::after{content:" ▼";font-size:9px}
-tbody tr:hover td{background:var(--bg)}tr:last-child td{border-bottom:0}
-td:first-child,th:first-child{position:sticky;left:0;background:var(--panel)}
-details{margin:6px 0}summary{cursor:pointer;font-weight:600}img{max-width:100%;border-radius:6px;border:1px solid var(--line)}
-.note{font-size:12px;color:var(--muted);margin:4px 0}
-select{font:inherit;font-size:12px;color:var(--text);background:var(--panel);border:1px solid var(--line);border-radius:6px;
-padding:2px 6px;max-width:100%}
-.isl h2{display:block;margin:6px 0 2px}.facts{color:var(--muted);font-size:12px;margin-bottom:6px}
-.isl ul.al{list-style:none;padding:0;margin:6px 0;display:grid;gap:3px}.isl ul.al li{padding-left:12px;position:relative}
-.isl ul.al li::before{content:"";position:absolute;left:0;top:.55em;width:6px;height:6px;border-radius:50%;background:var(--info)}
-.isl ul.al li[data-level=high]::before{background:var(--high)}.isl ul.al li[data-level=medium]::before{background:var(--medium)}
-td.st-out,td.st-low,td.st-nb{color:var(--high);font-weight:600}td.st-ns{color:var(--muted)}td.st-lim{color:var(--info)}
-footer{margin:30px 0;font-size:12px}kbd{font-size:11px;
-border:1px solid var(--line);border-radius:3px;padding:0 3px}
+#onlynew[aria-pressed=true]{color:var(--new);border-color:var(--new)}
+.seg{display:inline-flex}.seg button{border-radius:0}.seg button:first-child{border-radius:999px 0 0 999px}
+.seg button+button{border-radius:0 999px 999px 0;margin-left:-1px}
+#theme{width:30px;height:30px;padding:0;display:grid;place-items:center}
+select{font:inherit;font-size:12px;color:var(--ink);background:var(--slab);border:1px solid var(--rule);border-radius:6px;
+padding:4px 6px;max-width:100%}
+main{padding-block:20px 40px;display:grid;grid-template-columns:minmax(0,1fr);gap:34px}
+#v-alarms{display:grid;grid-template-columns:minmax(0,1fr);gap:34px}main>*,#v-alarms>*,.tablets>*{min-width:0}
+h2{font:20px/1.2 var(--display);font-variant:small-caps;letter-spacing:.06em;margin:0;color:var(--ink);text-wrap:balance}
+h3{font-size:14px;margin:14px 0 6px}
+.head{display:flex;align-items:baseline;flex-wrap:wrap;gap:4px 14px;margin-bottom:12px}
+.head p,.muted{margin:0;color:var(--ink-2);font-size:13px}
+.panel,.clock,.tablet{background:var(--slab);border:1px solid var(--rule);border-radius:10px}
+.clock{padding:16px 16px 6px}
+.scale{position:relative;height:150px;margin:0 6px 0 4px}
+.scale svg{position:absolute;inset:0;width:100%;height:100%;overflow:visible}
+.tick{stroke:var(--rule)}.tick.major{stroke:var(--ink-3)}.tlab{fill:var(--ink-3);font:11px var(--text)}
+.pin{position:absolute;transform:translateX(-50%);display:flex;flex-direction:column;align-items:center;gap:2px;
+background:none;border:0;border-radius:4px;padding:0;color:var(--ink)}
+.pin .dot{width:12px;height:12px;border-radius:50%;background:var(--medium);box-shadow:0 0 0 3px var(--slab)}
+.pin[data-level=high] .dot{background:var(--high);width:14px;height:14px}
+.pin[data-level=minor] .dot{background:var(--ink-3);width:9px;height:9px}
+.pin .lbl{font:600 12px/1.15 var(--text);white-space:nowrap;text-align:center}
+.pin .lbl small{display:block;font-weight:400;color:var(--ink-2);font-size:11px}
+.pin[data-level=minor] .lbl{font-weight:400;color:var(--ink-2)}.pin:hover .lbl,.pin.on .lbl{color:var(--ochre)}
+.ends{display:flex;justify-content:space-between;font-size:11px;color:var(--ink-3);margin:6px 6px 4px 4px}
+.rows{display:grid;gap:6px;margin-top:12px}
+.row{display:grid;grid-template-columns:92px minmax(0,1fr) auto;gap:4px 16px;align-items:center;padding:10px 14px;
+background:var(--slab);border:1px solid var(--rule);border-radius:8px;scroll-margin-top:110px}
+.row[data-level=high]{border-color:var(--high);background:linear-gradient(90deg,var(--high-bg),var(--slab) 55%)}
+.row.on,.item.on{outline:2px solid var(--ochre);outline-offset:1px}
+.when{font:700 26px/1 var(--text);letter-spacing:-.01em}.when small{font-size:13px;color:var(--ink-2);margin-left:2px}
+.row[data-level=high] .when{color:var(--high)}.row[data-level=medium] .when{color:var(--medium)}
+.what{min-width:0}.good{font-weight:700;font-size:16px}.where{color:var(--ink-2);font-size:13px}
+.hint{font-size:13px;color:var(--ink-2);margin-top:2px}
+.gauge{width:150px;display:grid;gap:4px;justify-items:end;font-size:12px;color:var(--ink-2)}
+.gauge .b{width:100%;height:6px;border-radius:3px;background:var(--slab-2);overflow:hidden}
+.gauge i{display:block;height:100%;background:var(--medium)}.row[data-level=high] .gauge i{background:var(--high)}
+.row[data-level=minor] .gauge i{background:var(--ink-3)}
+details.minor>summary{cursor:pointer;color:var(--ink-2);font-size:13px;padding:8px 2px}
+details.minor .row{padding:6px 14px}details.minor .when{font-size:18px}
+.new{font:700 10px/1 var(--text);letter-spacing:.08em;color:var(--new);border:1px solid var(--new);border-radius:3px;
+padding:2px 4px;margin:0 6px;vertical-align:2px}
+button.place{font:inherit;font-weight:700;color:inherit;border:0;border-radius:3px;padding:0;text-transform:none;
+letter-spacing:0;text-decoration:underline dotted;text-underline-offset:3px}button.place:hover{color:var(--ochre)}
+.two{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(360px,100%),1fr));gap:20px;align-items:start}
+.panel{padding:16px 18px;min-width:0}
+.tally{display:flex;gap:20px;flex-wrap:wrap;margin-bottom:14px}.tally div{display:flex;flex-direction:column}
+.tally strong{font:700 26px/1 var(--text)}.tally span{font-size:11px;color:var(--ink-2);text-transform:uppercase;letter-spacing:.07em}
+.up{color:var(--new)}.dn{color:var(--high)}
+ul.list{list-style:none;margin:0;padding:0;display:grid;gap:8px}
+ul.list>li{display:grid;grid-template-columns:10px minmax(0,1fr);gap:10px;align-items:baseline;scroll-margin-top:110px;border-radius:4px}
+ul.list>li::before{content:"";width:8px;height:8px;border-radius:50%;background:var(--info);transform:translateY(-1px)}
+ul.list>li[data-level=high]::before{background:var(--high)}ul.list>li[data-level=medium]::before{background:var(--medium)}
+.sub{display:block;font-size:12px;color:var(--ink-2)}
+.gt{font:600 11px/1 var(--text);letter-spacing:.08em;text-transform:uppercase;color:var(--ink-3);margin:18px 0 8px}
+.group:first-child .gt{margin-top:0}
+.tablets{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(270px,100%),1fr));gap:14px}
+.tablet{padding:16px 18px;display:grid;gap:12px;align-content:start}
+.tablet h3{font:18px/1 var(--display);font-variant:small-caps;letter-spacing:.06em;margin:0;display:flex;
+justify-content:space-between;align-items:baseline}.tablet h3 span{font:12px var(--text);color:var(--ink-3)}
+dl{margin:0;display:grid;grid-template-columns:auto 1fr;gap:5px 12px}dt{color:var(--ink-2)}
+dd{margin:0;text-align:right;font-weight:600}.d{font-weight:400;font-size:12px;margin-left:4px}
+.sea{font-size:13px;color:var(--ink-2);border-top:1px solid var(--rule);padding-top:10px}.sea b{color:var(--ink)}
+.hostile,.sea .hostile b{color:var(--high)}tr.hostile td:first-child{color:var(--high);font-weight:600}
+tr.you td{background:var(--slab-2);font-weight:600}
+.tablet button{justify-self:start}
+.wrapt{overflow-x:auto;background:var(--slab);border:1px solid var(--rule);border-radius:10px}
+table{border-collapse:collapse;width:100%;font-size:13px}
+th,td{padding:6px 12px;text-align:left;border-bottom:1px solid var(--rule);white-space:nowrap}
+td:not(.num){white-space:normal;min-width:7ch;max-width:46ch}
+td.num,th.num{text-align:right}
+th{font:600 11px/1.2 var(--text);letter-spacing:.07em;text-transform:uppercase;color:var(--ink-3);cursor:pointer;
+user-select:none;background:var(--slab)}th:hover{color:var(--ochre)}
+th[aria-sort=ascending]::after{content:" \\25B2";font-size:8px}th[aria-sort=descending]::after{content:" \\25BC";font-size:8px}
+tbody tr:hover td{background:var(--slab-2)}tr:last-child td{border-bottom:0}
+td:first-child,th:first-child{position:sticky;left:0;background:var(--slab)}
+td.st-out,td.st-low,td.st-nb{color:var(--high);font-weight:600}td.st-ns{color:var(--ink-3)}td.st-lim{color:var(--info)}
+details.sec{background:var(--slab);border:1px solid var(--rule);border-radius:10px;padding:0 16px}
+details.sec+details.sec{margin-top:10px}details.sec[open]{padding-bottom:16px}
+details.sec>summary{cursor:pointer;padding:12px 0;font:18px/1.2 var(--display);font-variant:small-caps;letter-spacing:.06em}
+details.sec .wrapt{background:var(--ground)}details.sec td:first-child,details.sec th,details.sec th:first-child{background:var(--ground)}
+details details>summary{cursor:pointer;font-weight:600;padding:6px 0}
+.note{font-size:12px;color:var(--ink-2);margin:4px 0}
+img{max-width:100%;border-radius:6px;border:1px solid var(--rule)}
+.isl h2{margin:4px 0 2px;font-size:24px}.facts{color:var(--ink-2);font-size:13px;margin-bottom:10px}
+.isl ul.list{margin:8px 0 4px}
+footer{color:var(--ink-3);font-size:12px;border-top:1px solid var(--rule);padding-top:14px;display:grid;gap:6px}
+kbd{font:11px var(--text);border:1px solid var(--rule);border-radius:3px;padding:0 4px;color:var(--ink-2)}
+@media (max-width:640px){.row{grid-template-columns:68px minmax(0,1fr)}.gauge{grid-column:2;justify-items:start;width:100%}
+.when{font-size:21px}.chips+.chips{padding-left:0;border-left:0}.save{max-width:100%}}
+@media (prefers-reduced-motion:no-preference){.pin .lbl,button{transition:color .15s,background-color .15s,border-color .15s}}
 """
 
 HTML_SCRIPT = r"""
 const S={get(k,d){try{const v=localStorage.getItem('anno117:'+k);return v===null?d:JSON.parse(v)}catch(e){return d}},
 set(k,v){try{localStorage.setItem('anno117:'+k,JSON.stringify(v))}catch(e){}}};
-const R=document.documentElement,B=window.__REPORT;
-R.dataset.theme=S.get('theme',matchMedia('(prefers-color-scheme: light)').matches?'light':'dark');
+const $=s=>document.querySelector(s),$$=s=>[...document.querySelectorAll(s)];
+const R=document.documentElement,B=window.__REPORT,HZ=B.horizon||60;
+R.dataset.theme=S.get('theme',window.matchMedia&&matchMedia('(prefers-color-scheme: light)').matches?'light':'dark');
 let hidden=new Set(S.get('hidden',['info'])),prov=S.get('prov','all'),onlyNew=S.get('onlyNew',false);
-const cards=[...document.querySelectorAll('.card')],secs=[...document.querySelectorAll('.sec[data-prov]')];
-const NB=document.getElementById('onlynew');
+const NB=$('#onlynew'),VI=$('#v-island'),VA=$('#v-alarms'),SEL=$('#isl');
+// an element with data-prov shows for "all" and for each province it lists; data-prov="all" only for "all"
+const inProv=el=>{const p=el.dataset.prov;return !p||prov==='all'||p.split(' ').includes(prov)};
 function apply(){
   const n={high:0,medium:0,info:0};
-  cards.forEach(c=>{const ok=prov==='all'||!c.dataset.prov||c.dataset.prov.split(' ').includes(prov);let vis=0;
-    c.querySelectorAll('li').forEach(li=>{const l=li.dataset.level,isNew=!!li.querySelector('.new');
-      if(ok&&(!onlyNew||isNew))n[l]++;const v=ok&&!hidden.has(l)&&(!onlyNew||isNew);li.hidden=!v;vis+=v});
-    c.hidden=!vis});
+  $$('.item').forEach(li=>{const l=li.dataset.level,ok=inProv(li)&&(!onlyNew||li.dataset.new==='1');
+    if(ok)n[l]++;li.hidden=!(ok&&!hidden.has(l))});
+  $$('.row').forEach(r=>{const l=r.dataset.level,ok=inProv(r)&&(!onlyNew||r.dataset.new==='1');
+    if(ok&&l!=='minor')n[l]++;r.hidden=!(ok&&!hidden.has(l))});
+  $$('[data-prov]:not(button):not(.item):not(.row)').forEach(el=>el.hidden=!inProv(el));
+  $$('.group').forEach(g=>g.hidden=!g.querySelector('.item:not([hidden])'));
+  const mi=$('#minor');if(mi){const k=mi.querySelectorAll('.row:not([hidden])').length;mi.hidden=!k;
+    mi.querySelector('summary').textContent=k+' slow '+(k===1?'drain':'drains')+': small stock, under the alarm threshold'}
+  const e1=$('#dry-none');if(e1)e1.hidden=!!$('#dry .row:not([hidden]),#dry .item:not([hidden])');
+  const e2=$('#hand-none');if(e2)e2.hidden=!!$('#hand .item:not([hidden])');
+  const e3=$('#chg-none');if(e3)e3.hidden=!!$('#changes li:not([hidden]):not(#chg-none)');
+  $$('button.lvl').forEach(b=>{const l=b.dataset.level;b.setAttribute('aria-pressed',!hidden.has(l));b.textContent=n[l]+' '+l});
+  $$('button.prov').forEach(b=>b.setAttribute('aria-pressed',b.dataset.prov===prov));
   if(NB)NB.setAttribute('aria-pressed',onlyNew);
-  secs.forEach(s=>s.hidden=!(prov==='all'||s.dataset.prov===prov));
-  document.querySelectorAll('button.lvl').forEach(b=>{const l=b.dataset.level;b.setAttribute('aria-pressed',!hidden.has(l));
-    b.textContent=n[l]+' '+l});
-  document.querySelectorAll('button.prov').forEach(b=>b.setAttribute('aria-pressed',b.dataset.prov===prov));
-  const empty=document.getElementById('none');if(empty)empty.hidden=cards.some(c=>!c.hidden);
   document.title=(n.high?'('+n.high+') ':'')+'Anno 117 report';
+  scale();
 }
+function scale(){
+  const el=$('#scale');if(!el)return;const svg=el.querySelector('svg'),w=el.clientWidth,h=el.clientHeight,base=h-22;
+  el.querySelectorAll('.pin').forEach(p=>p.remove());if(!w)return;
+  const x=m=>Math.min(m,HZ)/HZ*w,step=HZ>90?15:5;
+  let s='<defs><linearGradient id="water" x1="0" x2="1"><stop offset="0" stop-color="var(--high)" stop-opacity=".4"/>'
+    +'<stop offset=".3" stop-color="var(--medium)" stop-opacity=".2"/><stop offset="1" stop-color="var(--info)" stop-opacity=".06"/></linearGradient></defs>'
+    +'<rect fill="url(#water)" x="0" y="'+(base-6)+'" width="'+w+'" height="6" rx="3"/>';
+  for(let m=0;m<=HZ;m+=step){const major=m%(step*3)===0;
+    s+='<line class="tick'+(major?' major':'')+'" x1="'+x(m)+'" x2="'+x(m)+'" y1="'+base+'" y2="'+(base+(major?10:5))+'"/>';
+    if(major)s+='<text class="tlab" x="'+x(m)+'" y="'+(base+22)+'" text-anchor="middle">'+m+' min</text>'}
+  svg.innerHTML=s;
+  const lanes=[];let top=0;
+  $$('#dry .row:not([hidden])').forEach(r=>{const m=+r.dataset.min,b=document.createElement('button');
+    b.className='pin';b.dataset.level=r.dataset.level;b.type='button';
+    b.innerHTML='<span class="lbl"></span><span class="dot"></span>';
+    b.firstChild.textContent=r.dataset.good;const sm=document.createElement('small');sm.textContent=r.dataset.city;b.firstChild.appendChild(sm);
+    b.setAttribute('aria-label',r.dataset.good+', '+r.dataset.city+': empty in about '+Math.round(m)+' min');
+    el.appendChild(b);
+    const lw=b.firstChild.offsetWidth,cx=Math.max(lw/2,Math.min(w-lw/2,x(m))),half=lw/2+6;
+    let lane=lanes.findIndex(v=>v<=cx-half);if(lane<0){lane=lanes.length;lanes.push(0)}lanes[lane]=cx+half;
+    b.style.left=x(m)+'px';b.style.bottom=(h-base+3)+'px';
+    b.firstChild.style.transform='translateX('+(cx-x(m))+'px)';b.firstChild.style.marginBottom=(lane*36)+'px';
+    top=Math.max(top,lane);b.onclick=()=>focusEl(r)});
+  el.style.height=Math.max(110,top*36+100)+'px';
+  if(Math.abs(el.clientHeight-h)>1)scale();
+}
+function focusEl(r){const d=r.closest('details');if(d)d.open=true;
+  $$('.on').forEach(x=>x.classList.remove('on'));r.classList.add('on');r.scrollIntoView({block:'center'})}
 function toggle(l){hidden.has(l)?hidden.delete(l):hidden.add(l);S.set('hidden',[...hidden]);apply()}
 function toggleNew(){if(!NB)return;onlyNew=!onlyNew;S.set('onlyNew',onlyNew);apply()}
 if(NB)NB.onclick=toggleNew;
-document.querySelectorAll('button.lvl').forEach(b=>b.onclick=()=>toggle(b.dataset.level));
-document.querySelectorAll('button.prov').forEach(b=>b.onclick=()=>{prov=b.dataset.prov;S.set('prov',prov);apply()});
-document.getElementById('theme').onclick=()=>{R.dataset.theme=R.dataset.theme==='dark'?'light':'dark';S.set('theme',R.dataset.theme)};
-const maps=()=>{const d=[...document.querySelectorAll('details.map')],o=!d.some(x=>x.open);d.forEach(x=>x.open=o);S.set('maps',o)};
-document.getElementById('maps').onclick=maps;
-if(S.get('maps',false))document.querySelectorAll('details.map').forEach(x=>x.open=true);
-document.querySelectorAll('details[id]').forEach(d=>{const k='open:'+d.id,v=S.get(k,null);if(v!==null)d.open=v;
+$$('button.lvl').forEach(b=>b.onclick=()=>toggle(b.dataset.level));
+$$('button.prov').forEach(b=>b.onclick=()=>{prov=b.dataset.prov;S.set('prov',prov);apply()});
+$('#theme').onclick=()=>{R.dataset.theme=R.dataset.theme==='dark'?'light':'dark';S.set('theme',R.dataset.theme)};
+const maps=()=>{const d=$$('details.map'),o=!d.some(x=>x.open);d.forEach(x=>{x.open=o;if(o)x.closest('details.sec').open=true});S.set('maps',o)};
+$('#maps').onclick=maps;
+if(S.get('maps',false))$$('details.map').forEach(x=>x.open=true);
+$$('details[id]').forEach(d=>{const k='open:'+d.id,v=S.get(k,null);if(v!==null)d.open=v;
   d.addEventListener('toggle',()=>S.set(k,d.open))});
-document.querySelectorAll('table').forEach(t=>t.querySelectorAll('th').forEach((th,i)=>{
-  th.tabIndex=0;th.title='sort';
+$$('button.ledger').forEach(b=>b.onclick=()=>{const d=document.getElementById(b.dataset.sec);if(d){d.open=true;d.scrollIntoView({block:'start'})}});
+$$('table').forEach(t=>t.querySelectorAll('th').forEach((th,i)=>{th.tabIndex=0;th.title='sort';
   const sort=()=>{const b=t.tBodies[0],rows=[...b.rows],num=th.classList.contains('num');
     const dir=th.getAttribute('aria-sort')==='ascending'?'descending':'ascending';
     t.querySelectorAll('th[aria-sort]').forEach(x=>x.removeAttribute('aria-sort'));th.setAttribute('aria-sort',dir);
     // numeric columns: blank cells always last, whatever the direction
     const key=r=>{const c=r.cells[i];if(!num)return c.textContent.toLowerCase();const v=parseFloat(c.dataset.v);return isNaN(v)?null:v};
     const s=dir==='ascending'?1:-1;
-    rows.sort((x,y)=>{const a=key(x),c=key(y);if(a===null||c===null)return (a===null)-(c===null);
-      return (a>c?1:a<c?-1:0)*s});rows.forEach(r=>b.appendChild(r))};
+    rows.sort((x,y)=>{const a=key(x),c=key(y);if(a===null||c===null)return (a===null)-(c===null);return (a>c?1:a<c?-1:0)*s});
+    rows.forEach(r=>b.appendChild(r))};
   th.onclick=sort;th.onkeydown=e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();sort()}}}));
-function age(){const m=Math.round((Date.now()-B.generated)/60000),e=document.getElementById('age');
-  e.textContent='updated '+new Date(B.generated).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'})+' · '+m+' min ago';
+function age(){const m=Math.round((Date.now()-B.generated)/60000),e=$('#age');
+  e.textContent='updated '+new Date(B.generated).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'})+' · '+m+' min ago';
   e.classList.toggle('stale',m>=B.stale)}
 age();setInterval(age,30000);
-function go(d){const va=document.getElementById('v-alarms');if(va&&va.hidden)return;
-  const v=cards.filter(c=>!c.hidden);if(!v.length)return;const y=window.scrollY+70;
-  let i=d>0?v.findIndex(c=>c.getBoundingClientRect().top+window.scrollY>y+1):v.length-1-[...v].reverse().findIndex(c=>c.getBoundingClientRect().top+window.scrollY<y-1);
-  if(i<0||i>=v.length)i=d>0?v.length-1:0;cards.forEach(c=>c.classList.remove('cur'));v[i].classList.add('cur');
-  v[i].scrollIntoView({block:'start'})}
+function go(d){if(VA.hidden)return;const v=$$('#v-alarms .row,#v-alarms .item').filter(c=>c.offsetParent!==null);if(!v.length)return;
+  let i=v.findIndex(c=>c.classList.contains('on'));
+  if(i<0){const y=innerHeight/3;i=v.findIndex(c=>c.getBoundingClientRect().top>y);if(i<0)i=v.length;if(d<0)i--}else i+=d;
+  focusEl(v[Math.max(0,Math.min(v.length-1,i))])}
+function showIsland(id){if(!SEL)return;if(id&&[...SEL.options].some(o=>o.value===id))SEL.value=id;S.set('island',SEL.value);
+  $$('.isl').forEach(x=>x.hidden=x.dataset.id!==SEL.value)}
+function view(v){if(!VI)return;VI.hidden=v!=='island';VA.hidden=v==='island';
+  $$('.seg button').forEach(b=>b.setAttribute('aria-pressed',b.dataset.view===v));
+  $$('button.lvl,button.prov,#onlynew').forEach(b=>b.disabled=v==='island');   // they filter the overview only
+  S.set('view',v);scrollTo(0,0);if(v!=='island')scale()}
+if(SEL){showIsland(S.get('island',SEL.value));SEL.onchange=()=>{showIsland(SEL.value);view('island')};
+  $$('.seg button').forEach(b=>b.onclick=()=>view(b.dataset.view));
+  $$('button.place[data-island]').forEach(p=>p.onclick=()=>{showIsland(p.dataset.island);view('island')})}
 document.addEventListener('keydown',e=>{if(e.ctrlKey||e.metaKey||e.altKey||/input|select|textarea/i.test(e.target.tagName))return;
   const k=e.key;if(k==='1')toggle('high');else if(k==='2')toggle('medium');else if(k==='3')toggle('info');else if(k==='n')toggleNew();
   else if(k==='j')go(1);else if(k==='k')go(-1);else if(k==='m')maps();else if(k==='g')scrollTo(0,0);
-  else if(k==='t')document.getElementById('theme').click();else if(k==='r')location.reload()});
+  else if(k==='t')$('#theme').click();else if(k==='r')location.reload();
+  else if(k==='i'&&VI)view(VI.hidden?'island':'alarms')});
+let rz;addEventListener('resize',()=>{clearTimeout(rz);rz=setTimeout(scale,120)});
 try{const y=sessionStorage.getItem('anno117:y');if(y!==null){sessionStorage.removeItem('anno117:y');scrollTo(0,+y)}}catch(e){}
 if(B.stamp){let wait=5000;const poll=()=>{const s=document.createElement('script');
   s.src=B.stamp+'?t='+Date.now();
   s.onload=()=>{s.remove();if(window.__annoStamp&&window.__annoStamp!==B.build){
     try{sessionStorage.setItem('anno117:y',String(window.scrollY))}catch(e){}location.reload()}else setTimeout(poll,wait)};
   s.onerror=()=>{s.remove();setTimeout(poll,30000)};document.head.appendChild(s)};setTimeout(poll,wait)}
-const VI=document.getElementById('v-island'),VA=document.getElementById('v-alarms'),SEL=document.getElementById('isl');
-function showIsland(id){if(!SEL)return;if(id&&[...SEL.options].some(o=>o.value===id))SEL.value=id;S.set('island',SEL.value);
-  document.querySelectorAll('.isl').forEach(x=>x.hidden=x.dataset.id!==SEL.value)}
-function view(v){if(!VI)return;VI.hidden=v!=='island';VA.hidden=v==='island';
-  document.querySelectorAll('.seg button').forEach(b=>b.setAttribute('aria-pressed',b.dataset.view===v));
-  // level/new/province filters act on the alarm cards only
-  document.querySelectorAll('button.lvl,button.prov,#onlynew').forEach(b=>b.disabled=v==='island');
-  S.set('view',v);scrollTo(0,0)}
-if(SEL){showIsland(S.get('island',SEL.value));SEL.onchange=()=>{showIsland(SEL.value);view('island')};
-  document.querySelectorAll('.seg button').forEach(b=>b.onclick=()=>view(b.dataset.view));view(S.get('view','alarms'));
-  document.querySelectorAll('.place[data-island]').forEach(p=>p.onclick=()=>{showIsland(p.dataset.island);view('island')});
-  document.addEventListener('keydown',e=>{if(e.key==='i'&&!/input|select|textarea/i.test(e.target.tagName))view(VI.hidden?'island':'alarms')})}
+if(SEL)view(S.get('view','alarms'));
 apply();
 """
+
+CATEGORIES = (('owner', 'Islands lost or gained'), ('population', 'Population falling'), ('forces', 'Forces lost'),
+              ('workforce', 'Workforce short'), ('production', 'Production stopped'), ('income', 'Income falling'),
+              ('route', 'Trade routes'), ('limit', 'Routes unloading into full warehouses'),
+              ('overproduction', 'Overproduction'), ('', 'Other'))
+STATE_CLASS = {'out of stock': 'st-out', 'running low': 'st-low', 'not built': 'st-ns', 'not supplied': 'st-ns',
+               'at limit': 'st-lim', 'missing': 'st-out'}
 
 def render_html(rep, images, stamp=None):
     import base64, html
     h = html.escape
+    hostile = set(rep.get('hostile') or [])
+    island_of = {i['label']: i['id'] for i in rep.get('islands', [])}
+    detail_of = {(g['kind'], g['place']): g['detail'] for g in rep['groups']}
     def td(c):
         if isinstance(c, tuple):
             v = '' if c[1] is None else f' data-v="{c[1]}"'
             return f'<td class="num"{v}>{h(c[0])}</td>'
         return f'<td>{h(str(c))}</td>'
-    def table(t, sid):
+    def table(t, sid='', count=False):
         nums = [any(isinstance(r[i], tuple) for r in t['rows']) for i in range(len(t['headers']))]
         head = ''.join(f'<th class="num">{h(x)}</th>' if n else f'<th>{h(x)}</th>' for x, n in zip(t['headers'], nums))
-        body = ''.join('<tr>' + ''.join(td(c) for c in r) + '</tr>' for r in t['rows'])
+        sc = next((i for i, x in enumerate(t['headers']) if x in ('State', '')), -1)
+        def tr(r):
+            name = str(r[0])
+            cls = ' class="you"' if name.endswith(' (you)') else ' class="hostile"' if name in hostile else ''
+            return f'<tr{cls}>' + ''.join(f'<td class="{STATE_CLASS.get(c, "")}">{h(str(c))}</td>' if i == sc
+                                          else td(c) for i, c in enumerate(r)) + '</tr>'
         note = f'<p class="note">{h(t["note"])}</p>' if t.get('note') else ''
-        inner = f'{note}<div class="wrap"><table><thead><tr>{head}</tr></thead><tbody>{body}</tbody></table></div>'
+        inner = f'{note}<div class="wrapt"><table><thead><tr>{head}</tr></thead><tbody>{"".join(map(tr, t["rows"]))}</tbody></table></div>'
+        title = f'{h(t["title"])} ({len(t["rows"])})' if count or t.get('collapsed') else h(t['title'])
         if t.get('collapsed'):
             did = h(re.sub(r'\W+', '-', f'{sid}-{t["title"]}'))
-            return f'<details id="{did}"><summary>{h(t["title"])} ({len(t["rows"])})</summary>{inner}</details>'
-        return f'<h3>{h(t["title"])}</h3>{inner}'
+            return f'<details id="{did}"><summary>{title}</summary>{inner}</details>'
+        return f'<h3>{title}</h3>{inner}'
+    def place(name, label=None):
+        label = h(label or name)
+        if name in island_of:
+            return f'<button class="place" data-island="{h(island_of[name])}" title="open the island view">{label}</button>'
+        return f'<b>{label}</b>'
+    def delta(v, old, good_up=True):
+        if old is None or not round(v - old): return ''
+        up = v > old
+        return f'<span class="d {"up" if up == good_up else "dn"}">{"+" if up else "−"}{abs(v - old):,.0f}</span>'
+    new_tag = '<span class="new">NEW</span>'
     provs = [s['id'] for s in rep['sections'] if s['id'] != 'forces']
     meta = {'build': rep.get('build', ''), 'generated': rep.get('generated', 0), 'stale': rep.get('stale_minutes', 45),
-            'stamp': stamp}
-    bar = ('<div class="bar"><span class="title">Anno 117</span>'
-           f'<span class="save" title="{h(rep["save"] or "")}">{h(rep["save"] or "")}</span>'
+            'stamp': stamp, 'horizon': rep.get('horizon', 60)}
+    prev = rep['previous']
+
+    # ---- masthead and filters
+    bar = ('<header class="bar"><div class="wrap"><span class="mark">Acta Imperii</span>'
+           f'<div class="save"><b title="{h(rep["save"] or "")}">{h(rep["save"] or "")}</b><span>'
+           + (f'compared with {h(prev)}' if prev else 'no previous save to compare with (--compare)') + '</span></div>'
+           '<span class="grow"></span><span class="age" id="age"></span>'
+           '<button id="maps" title="open or close every map (m)">maps</button>'
+           '<button id="theme" title="light or dark (t)" aria-label="light or dark"><svg width="16" height="16" viewBox="0 0 16 16" '
+           'aria-hidden="true"><circle cx="8" cy="8" r="6" fill="none" stroke="currentColor" stroke-width="1.5"/>'
+           '<path d="M8 2a6 6 0 0 1 0 12z" fill="currentColor"/></svg></button></div>'
+           '<div class="wrap r2"><div class="chips" role="group" aria-label="province">'
+           '<button class="prov" data-prov="all">all</button>'
+           + ''.join(f'<button class="prov" data-prov="{h(p)}">{h(p)}</button>' for p in provs)
+           + '</div><div class="chips" role="group" aria-label="alarm level">'
            + ''.join(f'<button class="lvl {l}" data-level="{l}" title="show/hide ({k})">{l}</button>'
                      for l, k in (('high', 1), ('medium', 2), ('info', 3)))
-           + ('<button id="onlynew" aria-pressed="false" title="only alarms new since the previous save (n)">only new</button>'
-              if rep['previous'] else '')
-           + '<button class="prov" data-prov="all">all</button>'
-           + ''.join(f'<button class="prov" data-prov="{h(p)}">{h(p)}</button>' for p in provs)
-           + '<span class="grow"></span><span class="age" id="age"></span>'
-           + ('<span class="seg" role="group" aria-label="view"><button data-view="alarms" title="alarm cards (i)">Alarms</button>'
-              '<button data-view="island" title="one island in detail (i)">Island</button></span><select id="isl" aria-label="island">'
+           + (f'<button id="onlynew" aria-pressed="false" title="only what is new since the previous save (n)">only new</button>'
+              if prev else '')
+           + '</div><span class="grow"></span>'
+           + ('<span class="seg" role="group" aria-label="view"><button data-view="alarms" title="overview (i)">overview</button>'
+              '<button data-view="island" title="one island in detail (i)">island</button></span>'
+              '<select id="isl" aria-label="island">'
               + ''.join(f'<option value="{h(i["id"])}">{h(i["label"])}</option>' for i in rep.get('islands', []))
               + '</select>' if rep.get('islands') else '')
-           + '<button id="maps" title="maps (m)">maps</button><button id="theme" title="theme (t)">◐</button></div>')
+           + '</div></header>')
     out = ['<!doctype html><html lang="en" data-theme="dark"><head><meta charset="utf-8">',
            '<meta name="viewport" content="width=device-width,initial-scale=1">',
            f'<title>Anno 117 report</title><style>{HTML_STYLE}</style>',
            f'<script>window.__REPORT={json.dumps(meta)}</script></head><body>', bar, '<main>']
-    sub = []
-    if rep['previous']:
-        sub.append(f'compared with {h(rep["previous"])} · resolved since then: {rep.get("resolved", 0)}')
-    sub.append('keys: <kbd>1</kbd><kbd>2</kbd><kbd>3</kbd> levels · ' + ('<kbd>n</kbd> only new · ' if rep['previous'] else '')
-               + '<kbd>j</kbd>/<kbd>k</kbd> next/previous · '
-               '<kbd>i</kbd> island view · <kbd>m</kbd> maps · <kbd>g</kbd> top · <kbd>t</kbd> theme')
-    out.append(f'<p class="muted" style="font-size:12px;margin:2px 0">{" · ".join(sub)}</p>')
-    island_of = {i['label']: i['id'] for i in rep.get('islands', [])}
+
+    # ---- island view
     if rep.get('islands'):
-        state = {'out of stock': 'st-out', 'running low': 'st-low', 'not built': 'st-ns', 'not supplied': 'st-ns',
-                 'at limit': 'st-lim', 'missing': 'st-out'}
-        def isl_table(t):
-            nums = [any(isinstance(r[i], tuple) for r in t['rows']) for i in range(len(t['headers']))]
-            head = ''.join(f'<th class="num">{h(x)}</th>' if n else f'<th>{h(x)}</th>' for x, n in zip(t['headers'], nums))
-            sc = t['headers'].index('State') if 'State' in t['headers'] else -1
-            body = ''.join('<tr>' + ''.join(f'<td class="{state.get(c, "")}">{h(str(c))}</td>' if i == sc else td(c)
-                                            for i, c in enumerate(r)) + '</tr>' for r in t['rows'])
-            note = f'<p class="note">{h(t["note"])}</p>' if t.get('note') else ''
-            return f'<h3>{h(t["title"])} ({len(t["rows"])})</h3>{note}<div class="wrap"><table><thead><tr>{head}</tr></thead><tbody>{body}</tbody></table></div>'
         out.append('<div id="v-island" hidden>')
         for i in rep['islands']:
-            al = ''.join(f'<li data-level="{a["level"]}">' + ('<span class="new">NEW</span>' if a.get('new') else '')
-                         + h(a['text']) + '</li>' for a in i['alarms'])
+            al = ''.join(f'<li data-level="{a["level"]}"><span>' + (new_tag if a.get('new') else '')
+                         + h(a['text']) + '</span></li>' for a in i['alarms'])
             out.append(f'<section class="isl" data-id="{h(i["id"])}" hidden><h2>{h(i["label"])}</h2>'
                        f'<div class="facts">{h(" · ".join(i["facts"]))}</div>'
-                       + (f'<ul class="al">{al}</ul>' if al else '<p class="muted">No alarms on this island.</p>')
-                       + ''.join(isl_table(t) for t in i['tables']) + '</section>')
+                       + (f'<ul class="list">{al}</ul>' if al else '<p class="muted">No alarms on this island.</p>')
+                       + ''.join(table(t, count=True) for t in i['tables']) + '</section>')
         out.append('</div>')
     out.append('<div id="v-alarms">')
-    out.append('<div class="cards">')
-    seen = set()
-    for g in rep['groups']:
-        items = ''.join(
-            f'<li data-level="{a["level"]}"' + (f' title="{h(hint)}"' if hint and again else '') + '>'
-            + ('<span class="new">NEW</span>' if a.get('new') else '') + h(a['text'])
-            + (f'<div class="hint">{h(hint)}</div>' if hint and not again else '') + '</li>'
-            for a, hint, again in hints(g, seen))
-        out.append(f'<section class="card" data-level="{g["level"]}" data-prov="{h(" ".join(g.get("provs", [])))}">'
-                   + f'<div class="head">'
-                   + (f'<button class="place" data-island="{h(island_of[g["place"]])}" title="open the island view">{h(g["place"])}</button>'
-                      if g['place'] in island_of else f'<span class="place">{h(g["place"])}</span>')
-                   + f'<span class="kind">{h(KIND_LABEL.get(g["kind"], g["kind"]))}</span>'
-                   + (f'<span class="detail">{h(g["detail"])}</span>' if g['detail'] else '')
-                   + f'</div><ul>{items}</ul></section>')
-    out.append('</div><p id="none" class="muted" hidden>No alarms with the current filters.</p>')
+
+    # ---- running dry
+    hz = rep.get('horizon', 60)
+    rows = []
+    for d in rep.get('drains', []):
+        a = d['alarm']
+        level, new = (a['level'], a.get('new')) if a else ('minor', False)
+        name = f"{d['city']} ({d['prov']})"
+        rows.append((level, f'<div class="row" data-level="{level}" data-prov="{h(d["prov"])}" data-new="{int(bool(new))}" '
+                     f'data-min="{d["mins"]:.1f}" data-good="{h(d["good"])}" data-city="{h(d["city"])}">'
+                     f'<div class="when">~{d["mins"]:.0f}<small>min</small></div>'
+                     f'<div class="what"><div><span class="good">{h(d["good"])}</span>{new_tag if new else ""}</div>'
+                     f'<div class="where">{place(name, d["city"])} · {h(d["prov"].capitalize())}</div>'
+                     + (f'<div class="hint">{h(a["hint"])}</div>' if a and a['hint'] else '')
+                     + f'</div><div class="gauge"><span>{d["stock"]:,} left · {d["rate"]:.2f}/min</span>'
+                     f'<div class="b" title="stock against its peak of {d["peak"]:,} in the last 20 minutes">'
+                     f'<i style="width:{max(4, round(d["stock"] / d["peak"] * 100)) if d["peak"] else 100}%"></i></div></div></div>'))
+    empty = [a for a in rep['alarms'] if a.get('cat') == 'empty']
+    out.append('<section id="dry"><div class="head"><h2>Running dry</h2>'
+               f'<p>Minutes until each warehouse is empty, from the last 20 minutes of stock (next {hz:g} min). '
+               'Click a mark to find its row.</p></div>')
+    if rows:
+        out.append('<div class="clock"><div class="scale" id="scale"><svg aria-hidden="true"></svg></div>'
+                   f'<div class="ends"><span>now (at save)</span><span>in {hz:g} min</span></div></div>')
+    out.append('<div class="rows">' + ''.join(r for l, r in rows if l != 'minor') + '</div>')
+    minor = [r for l, r in rows if l == 'minor']
+    if minor:
+        out.append('<details class="minor" id="minor"><summary></summary><div class="rows">' + ''.join(minor) + '</div></details>')
+    if empty:
+        out.append('<p class="gt">Already empty</p><ul class="list">' + ''.join(
+            f'<li class="item" data-level="{a["level"]}" data-prov="{h(" ".join(a["provs"]))}" data-new="{int(bool(a.get("new")))}">'
+            f'<span>{place(a["place"])}{new_tag if a.get("new") else ""} {h(a["text"])}'
+            f'<span class="sub">{h(a["hint"])}</span></span></li>' for a in empty) + '</ul>')
+    out.append(f'<p class="muted" id="dry-none" hidden>Nothing runs dry in the next {hz:g} minutes with the current filters.</p></section>')
+
+    # ---- since the last save / needs a hand
+    out.append('<div class="two"><section class="panel"><div class="head"><h2>Since the last save</h2></div>')
+    if prev:
+        sums = [s['summary'] for s in rep['sections'] if s.get('summary')]
+        dpop = sum(s['pop'] - s['pop_prev'] for s in sums if s['pop_prev'] is not None)
+        dinc = sum(s['inc'] - s['inc_prev'] for s in sums if s['inc_prev'] is not None)
+        nnew = sum(1 for a in rep['alarms'] if a.get('new'))
+        out.append(f'<div class="tally"><div><strong>{nnew}</strong><span>new alarms</span></div>'
+                   f'<div><strong class="up">{rep.get("resolved", 0)}</strong><span>resolved</span></div>'
+                   f'<div><strong class="{"up" if dpop >= 0 else "dn"}">{round(dpop):+,}</strong><span>residents</span></div>'
+                   f'<div><strong class="{"up" if dinc >= 0 else "dn"}">{round(dinc):+,}</strong><span>income / min</span></div></div>')
+        order = {'high': 0, 'medium': 1, 'info': 2}
+        chg = sorted((a for a in rep['alarms'] if a.get('new') or a['vs_prev']), key=lambda a: order[a['level']])
+        out.append('<ul class="list" id="changes">' + ''.join(
+            f'<li data-level="{a["level"]}" data-prov="{h(" ".join(a["provs"]))}"><span>{place(a["place"])}'
+            f'{new_tag if a.get("new") else ""} {h(a["text"])}</span></li>' for a in chg)
+            + '<li id="chg-none" class="muted" hidden>No changes in this province.</li></ul>')
+        out.append(f'<p class="muted" style="margin-top:12px">Compared with {h(prev)}.</p>')
+    else:
+        out.append('<p class="muted">Run the report with <kbd>--compare PREVIOUS</kbd> to see what changed between two saves.</p>')
+    out.append('</section><section class="panel" id="hand"><div class="head"><h2>Needs a hand</h2></div>')
+    seen, cats = set(), dict(CATEGORIES)
+    for cat, title in CATEGORIES:
+        items = [a for a in rep['alarms'] if (a.get('cat') or '') == cat or (cat == '' and a.get('cat') not in cats)]
+        items = [a for a in items if a.get('cat') not in ('stock', 'empty')]
+        if not items: continue
+        lis = []
+        for a in items:
+            detail = detail_of.get((a['kind'], a['place']), '')
+            hint = a['hint'] if a['hint'] and a['hint'] not in seen else ''
+            if a['hint']: seen.add(a['hint'])
+            lis.append(f'<li class="item" data-level="{a["level"]}" data-prov="{h(" ".join(a["provs"]))}" '
+                       f'data-new="{int(bool(a.get("new")))}"' + (f' title="{h(a["hint"])}"' if a['hint'] and not hint else '')
+                       + f'><span>{place(a["place"])}{new_tag if a.get("new") else ""} {h(a["text"])}'
+                       + (f'<span class="sub">{h(detail)}</span>' if detail else '')
+                       + (f'<span class="sub">→ {h(hint)}</span>' if hint else '') + '</span></li>')
+        out.append(f'<div class="group"><p class="gt">{h(title)}</p><ul class="list">{"".join(lis)}</ul></div>')
+    out.append('<p class="muted" id="hand-none" hidden>Nothing else with the current filters. '
+               'Info-level alarms are off by default: press <kbd>3</kbd>.</p></section></div>')
+
+    # ---- provinces
+    tabs = []
     for s in rep['sections']:
-        prov = f' data-prov="{"all" if s["id"] == "forces" else h(s["id"])}"'   # forces: only with the "all" filter
-        out.append(f'<details class="sec" id="sec-{h(s["id"])}" open{prov}><summary><h2>{h(s["title"])}</h2></summary>')
-        if s['elapsed_min'] is not None: out.append(f'<p class="muted">{h(elapsed_text(s["elapsed_min"]))}</p>')
-        img = images.get(s['id'])
-        if img:
-            with open(img, 'rb') as f:
-                out.append(f'<details class="map"><summary>Map</summary><img loading="lazy" decoding="async" '
-                           f'alt="Map of {h(s["title"])}" src="data:image/png;base64,{base64.b64encode(f.read()).decode()}"></details>')
-        out += [table(t, s['id']) for t in s['tables']]
-        out.append('</details>')
+        sm = s.get('summary')
+        if not sm: continue
+        sea = ' · '.join((f'<span class="hostile">{h(n)} <b>{w}</b></span>' if hos else f'{"You" if you else h(n)} <b>{w}</b>')
+                         for n, w, you, hos in sm['sea'])
+        top = f'<dt>Largest city</dt><dd>{h(sm["top"][0])} {sm["top"][1]:,}</dd>' if sm['top'] else ''
+        tabs.append(f'<article class="tablet" data-prov="{h(s["id"])}"><h3>{h(s["title"])}<span>{sm["islands"]} islands</span></h3>'
+                    f'<dl><dt>Residents</dt><dd>{sm["pop"]:,}{delta(sm["pop"], sm["pop_prev"])}</dd>'
+                    f'<dt>Income / min</dt><dd>{sm["inc"]:,}{delta(sm["inc"], sm["inc_prev"])}</dd>{top}</dl>'
+                    + (f'<div class="sea">Warships: {sea}</div>' if sea else '')
+                    + f'<button class="ledger" data-sec="sec-{h(s["id"])}">tables, map and warehouses</button></article>')
+    if tabs:
+        out.append('<section><div class="head"><h2>Provinces</h2><p>Your islands; changes since the last save next to '
+                   'each figure. Pirates in red.</p></div><div class="tablets">' + ''.join(tabs) + '</div></section>')
+
+    # ---- forces, then the full ledgers
+    for s in rep['sections']:
+        if s['id'] == 'forces':
+            out.append('<section data-prov="all" id="sec-forces"><div class="head"><h2>Forces</h2><p>All provinces together.</p></div>'
+                       + ''.join(table(t, 'forces').split('</h3>', 1)[-1] for t in s['tables']) + '</section>')
+    ledgers = [s for s in rep['sections'] if s['id'] != 'forces']
+    if ledgers:
+        out.append('<section><div class="head"><h2>Ledgers</h2><p>Every table of each province, its map and warehouses. '
+                   'Click a column to sort.</p></div>')
+        for s in ledgers:
+            out.append(f'<details class="sec" id="sec-{h(s["id"])}" data-prov="{h(s["id"])}"><summary>{h(s["title"])}</summary>')
+            if s['elapsed_min'] is not None: out.append(f'<p class="muted">{h(elapsed_text(s["elapsed_min"]))}</p>')
+            img = images.get(s['id'])
+            if img:
+                with open(img, 'rb') as f:
+                    out.append(f'<details class="map"><summary>Map</summary><img loading="lazy" decoding="async" '
+                               f'alt="Map of {h(s["title"])}" src="data:image/png;base64,{base64.b64encode(f.read()).decode()}"></details>')
+            out += [table(t, s['id']) for t in s['tables']]
+            out.append('</details>')
+        out.append('</section>')
     out.append('</div>')
-    out.append('<footer class="muted">Made with anno117.py report. Trends come from the warehouse chart stored '
-               'in the save (last 20 minutes); storage limits are estimated.</footer></main>')
+    out.append('<footer><span>Keys: <kbd>1</kbd> <kbd>2</kbd> <kbd>3</kbd> levels · ' + ('<kbd>n</kbd> only new · ' if prev else '')
+               + '<kbd>j</kbd>/<kbd>k</kbd> next/previous · <kbd>i</kbd> island view · <kbd>m</kbd> maps · <kbd>g</kbd> top · '
+               '<kbd>t</kbd> theme · <kbd>r</kbd> reload</span>'
+               + (f'<span>Resolved since the previous save: {rep.get("resolved", 0)}.</span>' if prev else '')
+               + '<span>Made with anno117.py report. Trends come from the warehouse chart stored in the save (last 20 '
+               'minutes); storage limits are estimated. The page reloads itself when the report is generated again.</span>'
+               '</footer></main>')
     out.append(f'<script>{HTML_SCRIPT}</script></body></html>')
     return '\n'.join(out)
 

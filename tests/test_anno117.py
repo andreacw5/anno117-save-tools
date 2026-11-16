@@ -760,6 +760,20 @@ class TestReport(TempDirMixin, unittest.TestCase):
             self.assertIn(needle, page)
         self.assertIn('data-theme="dark"', page)
 
+    def test_running_dry_and_pirates(self):
+        s = self.session()
+        s['participants'].append({'participant': 60, 'name': 'Raiders', 'warships': 4, 'civil_ships': 0, 'troops': 0,
+                                  'units': [], 'ships': []})
+        s['participant_kinds'] = {'60': 'pirate'}
+        rep = A.report_data([s], None, {41})
+        dr = rep['drains'][0]
+        self.assertEqual((dr['good'], round(dr['mins']), dr['alarm']['level'], dr['alarm']['cat']), ('Bread', 10, 'high', 'stock'))
+        self.assertEqual(rep['hostile'], ['Raiders'])
+        self.assertIn(('Raiders', 4, False, True), rep['sections'][-1]['summary']['sea'])
+        page = A.render_html(rep, {})
+        for needle in ('id="scale"', 'data-good="Bread"', '<span class="hostile">Raiders', '<tr class="hostile">', 'Ledgers'):
+            self.assertIn(needle, page)
+
 
 if __name__ == '__main__':
     unittest.main()
