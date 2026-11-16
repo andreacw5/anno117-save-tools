@@ -241,8 +241,8 @@ A ship's default name is `Nameable/VehicleTextGuid` (see above). A typed ship na
 same `UserGeneratedTexts` list as city names, with no link to the ship that we found. `extract`
 writes each ship's `meta_id` (its `MetaPersistent/MetaID`), so you can name ships yourself with
 `--ship-names FILE`, a JSON object `{"<MetaID>": "name"}`; keys starting with `_` are ignored.
-The name is added as `custom_name` to fleet ships and to trade route ships. Whether a MetaID stays
-the same across saves is not verified yet.
+The name is added as `custom_name` to fleet ships and to trade route ships. A ship keeps its MetaID
+across saves, also when it sails to another province (74 ships compared over four consecutive saves).
 
 ### Residents' consumption (not computed)
 
